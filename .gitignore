@@ -1,0 +1,10 @@
+node_modules/
+.venv/
+.pytest_cache/
+__pycache__/
+
+flatten-code.cjs
+*.json
+project_summary*.md
+*.txt
+*.xlsx
