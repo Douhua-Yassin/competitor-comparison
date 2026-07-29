@@ -1,0 +1,62 @@
+name: Windows Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install ruff
+          python -m pip check
+
+      - name: Python compile check
+        run: python -m compileall -q app tests
+
+      - name: Pytest
+        run: python -m pytest -q
+
+      - name: Fatal Python lint checks
+        run: ruff check app tests --select E9,F63,F7,F82
+
+      - name: JavaScript syntax check
+        run: node --check app/static/app.js
+
+      - name: Batch script static checks
+        shell: pwsh
+        run: |
+          $files = @(
+            '首次安装.bat',
+            '启动插件浏览器.bat',
+            '启动程序.bat',
+            '停止程序.bat',
+            '故障检查.bat'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw "缺少文件：$file" }
+            $text = Get-Content -Raw -Encoding UTF8 $file
+            if ($text -notmatch 'chcp 65001') { throw "$file 缺少 UTF-8 代码页设置" }
+          }
+          $start = Get-Content -Raw -Encoding UTF8 '启动程序.bat'
+          if ($start -notmatch 'server.pid') { throw '启动程序未写入 server.pid' }
+          if ($start -notmatch 'PassThru') { throw '启动程序未获取服务 PID' }
+          $stop = Get-Content -Raw -Encoding UTF8 '停止程序.bat'
+          if ($stop -notmatch 'CommandLine') { throw '停止程序未校验进程命令行' }
+          if ($stop -notmatch 'ExecutablePath') { throw '停止程序未校验项目虚拟环境' }
+          if ($stop -match 'findstr ":8787') { throw '停止程序仍按端口直接杀进程' }
