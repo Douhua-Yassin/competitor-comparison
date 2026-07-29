@@ -1,5 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
 
+Add-Type -AssemblyName System.Net.Http
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 function Show-AppMessage {
@@ -27,7 +28,7 @@ function Show-AppMessage {
 function New-NoProxyHttpClient {
     $handler = New-Object System.Net.Http.HttpClientHandler
     $handler.UseProxy = $false
-    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client = [System.Net.Http.HttpClient]::new($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(3)
     return $client
 }
