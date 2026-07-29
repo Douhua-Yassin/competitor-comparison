@@ -1,7 +1,10 @@
 @echo off
+chcp 65001 >nul
 setlocal
+title Amazon 竞品监控 - 故障检查
 cd /d "%~dp0"
 set "PY=.venv\Scripts\python.exe"
+
 echo ===== Amazon 竞品监控故障检查 =====
 echo.
 echo [1/8] Python 与虚拟环境
@@ -26,7 +29,7 @@ echo [7/8] 插件浏览器 9222 端口
 powershell -NoProfile -Command "try { $v=Invoke-RestMethod http://127.0.0.1:9222/json/version -TimeoutSec 2; Write-Host ('9222 正常：' + $v.Browser) } catch { Write-Host '9222 未启动，请先运行“启动插件浏览器.bat”。' }"
 echo.
 echo [8/8] Web 服务 8787 端口
-powershell -NoProfile -Command "try { $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/api/status -TimeoutSec 2; Write-Host ('8787 正常：HTTP ' + $r.StatusCode) } catch { Write-Host '8787 未启动。' }"
+powershell -NoProfile -Command "try { $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/api/status -TimeoutSec 2; Write-Host ('8787 正常：HTTP ' + $r.StatusCode) } catch { Write-Host '8787 未启动。'; if (Test-Path 'data\server-error.log') { Write-Host '可查看：data\server-error.log' } }"
 echo.
 echo 检查结束。本文件不会抓取商品，也不会修改数据库。
 pause
