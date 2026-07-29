@@ -10,12 +10,13 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :failed
 )
 
-echo 正在升级 pip...
-.venv\Scripts\python.exe -m pip install --upgrade pip
+echo 当前 Python 版本：
+.venv\Scripts\python.exe --version
 if errorlevel 1 goto :failed
 
+echo.
 echo 正在安装程序依赖...
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install --disable-pip-version-check --no-cache-dir -r requirements.txt
 if errorlevel 1 goto :failed
 
 echo.
