@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+jinja2
+openpyxl
+playwright
+beautifulsoup4
+pytest
+httpx
