@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - review/pr1-static-test
+  pull_request:
+    branches:
+      - agent/multi-product-line-cdp
   workflow_dispatch:
 
 jobs:
