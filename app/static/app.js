@@ -47,9 +47,10 @@ function renderCell(cell) {
     `数据来源：${esc(record.data_source || '—')}`,
     `卖家精灵：${esc(record.seller_sprite_status || '—')}`,
     `配送位置：${esc(record.delivery_status || '—')}`,
+    record.error_message ? `提示：${esc(record.error_message)}` : null,
     `抓取时间：${esc(record.captured_at)}`,
     `状态：${esc(record.crawl_status)}`,
-  ].join('<br>');
+  ].filter(Boolean).join('<br>');
   return `<td class="date ${cell.tone}">
     <div class="price">${esc(price)}</div>
     <div class="sales">月销量 ${esc(record.sales_text || '—')}</div>
@@ -101,7 +102,8 @@ function beginPolling() {
   pollingTimer = setInterval(async () => {
     try {
       const status = await fetch('/api/status').then(response => response.json());
-      const progress = status.total ? `完成 ${status.success + status.failed}/${status.total}` : '';
+      const completed = (status.success || 0) + (status.partial || 0) + (status.failed || 0);
+      const progress = status.total ? `完成 ${completed}/${status.total}` : '';
       setStatus([status.message, progress].filter(Boolean).join('；'), status.browser_status === 'connection_failed');
       if (!status.running) {
         clearInterval(pollingTimer);
