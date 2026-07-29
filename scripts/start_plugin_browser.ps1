@@ -13,14 +13,13 @@ function Get-CdpInfo {
     return $null
 }
 
-$chromeCandidates = @(
-    $env:APP_CHROME_PATH,
-    (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'),
-    (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe')
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$chromeCandidates = New-Object System.Collections.Generic.List[string]
+if ($env:APP_CHROME_PATH) { $chromeCandidates.Add($env:APP_CHROME_PATH) }
+if ($env:LOCALAPPDATA) { $chromeCandidates.Add((Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')) }
+if ($env:ProgramFiles) { $chromeCandidates.Add((Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe')) }
+if (${env:ProgramFiles(x86)}) { $chromeCandidates.Add((Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe')) }
 
-$chrome = $chromeCandidates | Select-Object -First 1
+$chrome = $chromeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $chrome) {
     Show-AppMessage -Message '未找到 Google Chrome。' -Icon Error
     exit 1
@@ -56,7 +55,7 @@ New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
 $arguments = @(
     '--remote-debugging-address=127.0.0.1',
     '--remote-debugging-port=9222',
-    "--user-data-dir=$userDataDir",
+    "--user-data-dir=`"$userDataDir`"",
     '--no-first-run'
 )
 if ($usingDefaultProfile) {
