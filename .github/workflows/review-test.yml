@@ -1,0 +1,68 @@
+name: PR1 Static Review Test
+
+on:
+  push:
+    branches:
+      - review/pr1-static-test
+  workflow_dispatch:
+
+jobs:
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install ruff
+          python -m pip check
+
+      - name: Python compile check
+        run: python -m compileall -q app tests
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Fatal Python lint checks
+        run: ruff check app tests --select E9,F63,F7,F82
+
+      - name: JavaScript syntax check
+        run: node --check app/static/app.js
+
+      - name: Batch script static checks
+        shell: pwsh
+        run: |
+          $files = @(
+            '首次安装.bat',
+            '启动插件浏览器.bat',
+            '启动程序.bat',
+            '停止程序.bat',
+            '故障检查.bat'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw "缺少文件：$file" }
+            $text = Get-Content -Raw -Encoding UTF8 $file
+            if ($text -notmatch 'chcp 65001') { throw "$file 缺少 UTF-8 代码页设置" }
+          }
+
+          $browser = Get-Content -Raw -Encoding UTF8 '启动插件浏览器.bat'
+          if ($browser -notmatch '9222') { throw '插件浏览器脚本未检查 9222' }
+          if ($browser -notmatch 'MessageBox') { throw '插件浏览器脚本缺少弹窗提示' }
+
+          $start = Get-Content -Raw -Encoding UTF8 '启动程序.bat'
+          if ($start -match 'cmd /k') { throw '启动程序仍保留永久黑窗' }
+          if ($start -notmatch 'WindowStyle Hidden') { throw '启动程序未后台隐藏服务' }
+          if ($start -notmatch 'server-error.log') { throw '启动程序缺少错误日志' }
+
+          $stop = Get-Content -Raw -Encoding UTF8 '停止程序.bat'
+          if ($stop -notmatch '8787') { throw '停止程序未定位 8787 服务' }
