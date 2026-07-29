@@ -1,24 +1,23 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-  echo 正在创建 Python 虚拟环境...
-  py -m venv .venv
-  if errorlevel 1 goto :failed
+set "PY=.venv\Scripts\python.exe"
+if not exist "%PY%" (
+  echo 尚未完成首次安装，请先双击“首次安装.bat”。
+  pause
+  exit /b 1
 )
-echo 正在安装/检查依赖...
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-if errorlevel 1 goto :failed
-echo 正在检查 Playwright Chromium...
-.venv\Scripts\python.exe -m playwright install chromium
-if errorlevel 1 goto :failed
-start "" /b cmd /c "timeout /t 2 /nobreak ^>nul ^& start http://127.0.0.1:8787"
-echo 正在启动程序。请勿关闭此窗口；关闭窗口将停止服务。
-.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8787
-goto :end
-:failed
-echo.
-echo 启动失败。请阅读上方错误信息。
+powershell -NoProfile -Command "try { $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/api/status -TimeoutSec 1; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1"
+if not errorlevel 1 goto :ready
+start "Amazon 竞品价格监控" cmd /k .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8787
+for /l %%i in (1,1,60) do (
+  powershell -NoProfile -Command "try { $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/api/status -TimeoutSec 1; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1"
+  if not errorlevel 1 goto :ready
+  timeout /t 1 /nobreak >nul
+)
+echo 服务启动失败，请运行“故障检查.bat”。
 pause
-:end
-endlocal
+exit /b 1
+:ready
+start "" http://127.0.0.1:8787
+exit /b 0
