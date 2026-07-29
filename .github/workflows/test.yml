@@ -40,7 +40,7 @@ jobs:
             )
             if ($errors.Count -gt 0) {
               $errors | Format-List
-              throw "$($file.Name) 存在 PowerShell 语法错误"
+              throw "$($file.Name) has PowerShell syntax errors"
             }
           }
 
