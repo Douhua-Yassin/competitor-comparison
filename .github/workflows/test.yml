@@ -96,3 +96,4 @@ jobs:
           Start-Sleep -Seconds 2
           curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/status *> $null
           if ($LASTEXITCODE -eq 0) { throw '停止脚本结束后 8787 仍在监听' }
+          exit 0
