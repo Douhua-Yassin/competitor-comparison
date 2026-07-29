@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -55,3 +56,35 @@ def test_join_messages_removes_duplicates():
     assert main.join_messages(
         "Amazon CAPTCHA", "seller_sprite_unavailable", "Amazon CAPTCHA"
     ) == "Amazon CAPTCHA; seller_sprite_unavailable"
+
+
+def test_connect_browser_uses_websocket_and_extended_timeout(monkeypatch):
+    calls = []
+    expected_browser = object()
+
+    class FakeChromium:
+        async def connect_over_cdp(self, endpoint, timeout):
+            calls.append((endpoint, timeout))
+            return expected_browser
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    monkeypatch.setattr(
+        main,
+        "get_cdp_info",
+        lambda: {
+            "Browser": "Chrome/134.0.0.0",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+        },
+    )
+
+    browser = asyncio.run(main.connect_browser(FakePlaywright()))
+    assert browser is expected_browser
+    assert calls == [
+        (
+            "ws://127.0.0.1:9222/devtools/browser/test",
+            main.CDP_CONNECT_TIMEOUT_MS,
+        )
+    ]
+    assert main.CDP_CONNECT_TIMEOUT_MS == 120_000
