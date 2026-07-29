@@ -8,7 +8,7 @@ on:
 jobs:
   windows-test:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +21,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Parse PowerShell scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $files = Get-ChildItem scripts -Filter *.ps1
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              throw "$($file.Name) 存在 PowerShell 语法错误"
+            }
+          }
 
       - name: Run actual first-install script
         shell: pwsh
@@ -49,43 +67,42 @@ jobs:
       - name: JavaScript syntax check
         run: node --check app/static/app.js
 
-      - name: Batch script static checks
+      - name: Launcher wrapper checks
         shell: pwsh
         run: |
-          $files = @(
-            '首次安装.bat',
-            '启动插件浏览器.bat',
-            '启动程序.bat',
-            '停止程序.bat',
-            '故障检查.bat'
-          )
-          foreach ($file in $files) {
-            if (-not (Test-Path $file)) { throw "缺少文件：$file" }
-            $text = Get-Content -Raw -Encoding UTF8 $file
-            if ($text -notmatch 'chcp 65001') { throw "$file 缺少 UTF-8 代码页设置" }
-            if ($text -match '\^\| Out-Null') { throw "$file 包含会传给 PowerShell 的错误 ^| 语法" }
+          $mapping = @{
+            '首次安装.bat' = 'scripts\first_install.ps1'
+            '启动插件浏览器.bat' = 'scripts\start_plugin_browser.ps1'
+            '启动程序.bat' = 'scripts\start_server.ps1'
+            '停止程序.bat' = 'scripts\stop_server.ps1'
+            '故障检查.bat' = 'scripts\diagnose.ps1'
+          }
+          foreach ($entry in $mapping.GetEnumerator()) {
+            if (-not (Test-Path $entry.Key)) { throw "缺少文件：$($entry.Key)" }
+            if (-not (Test-Path $entry.Value)) { throw "缺少文件：$($entry.Value)" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $entry.Key))
+            if ($bytes | Where-Object { $_ -gt 127 }) {
+              throw "$($entry.Key) 必须保持纯 ASCII，避免 cmd.exe 误解析中文"
+            }
+            $text = Get-Content -Raw -Encoding ASCII $entry.Key
+            if ($text -notmatch [regex]::Escape($entry.Value)) {
+              throw "$($entry.Key) 没有调用 $($entry.Value)"
+            }
           }
 
           $requirements = Get-Content -Raw -Encoding UTF8 'requirements.txt'
           if ($requirements -notmatch 'playwright>=1\.48,<1\.49') {
-            throw 'Playwright 未锁定到用户环境可安装的 1.48 系列'
+            throw 'Playwright 未锁定到 1.48 系列'
           }
 
-          $start = Get-Content -Raw -Encoding UTF8 '启动程序.bat'
-          if ($start -notmatch 'server.pid') { throw '启动程序未写入 server.pid' }
-          if ($start -notmatch 'PassThru') { throw '启动程序未获取服务 PID' }
-          if ($start -notmatch 'curl\.exe.*--noproxy') { throw '启动程序健康检查未绕过本机代理' }
-          if ($start -match 'for /f.*Start-Process') { throw '启动程序仍使用易阻塞的 for /f 捕获进程' }
-
-          $stop = Get-Content -Raw -Encoding UTF8 '停止程序.bat'
-          if ($stop -notmatch 'CommandLine') { throw '停止程序未校验进程命令行' }
-          if ($stop -notmatch 'ExecutablePath') { throw '停止程序未校验项目虚拟环境' }
-          if ($stop -match 'findstr ":8787') { throw '停止程序仍按端口直接杀进程' }
-
-      - name: Real start and stop batch smoke test
+      - name: Create test workbook
         shell: pwsh
         run: |
           .\.venv\Scripts\python.exe -c "from openpyxl import Workbook; w=Workbook(); s=w.active; s.title='测试产品线'; s.append(['品牌','尺寸','ASIN','星级（评价）','售价','是否我方']); s.append(['TEST','13','B0D3D2W989',None,100,'是']); w.save('产品输入表.xlsx')"
+
+      - name: Real start and stop launcher smoke test
+        shell: pwsh
+        run: |
           $env:CI = '1'
           cmd.exe /d /c "启动程序.bat"
           if ($LASTEXITCODE -ne 0) { throw "启动程序.bat 失败：$LASTEXITCODE" }
@@ -97,3 +114,44 @@ jobs:
           curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/status *> $null
           if ($LASTEXITCODE -eq 0) { throw '停止脚本结束后 8787 仍在监听' }
           exit 0
+
+      - name: Stop legacy system-Python server
+        if: matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $legacy = Start-Process -FilePath python -ArgumentList '-m uvicorn app.main:app --host 127.0.0.1 --port 8787' -WorkingDirectory $PWD -WindowStyle Hidden -PassThru
+          for ($i = 0; $i -lt 30; $i++) {
+            curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/status *> $null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 1
+          }
+          $env:CI = '1'
+          cmd.exe /d /c "停止程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw '停止程序未能关闭旧式系统 Python 服务' }
+          Start-Sleep -Seconds 2
+          if (Get-Process -Id $legacy.Id -ErrorAction SilentlyContinue) {
+            throw '旧式服务进程仍然存在'
+          }
+
+      - name: Real Chrome CDP connection smoke test
+        if: matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+          )
+          $chrome = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chrome) { throw 'CI 环境未找到 Chrome' }
+
+          $env:CI = '1'
+          $env:APP_CHROME_PATH = $chrome
+          $env:APP_CHROME_USER_DATA_DIR = Join-Path $env:RUNNER_TEMP "competitor-cdp-$env:GITHUB_RUN_ID"
+          cmd.exe /d /c "启动插件浏览器.bat"
+          if ($LASTEXITCODE -ne 0) { throw "启动插件浏览器.bat 失败：$LASTEXITCODE" }
+
+          .\.venv\Scripts\python.exe -m app.cdp_probe
+          if ($LASTEXITCODE -ne 0) { throw 'Playwright CDP 实际连接失败' }
+
+          $listener = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($listener) { Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue }
