@@ -30,6 +30,7 @@ SELLER_SPRITE_WAIT_SECONDS = 30
 DELIVERY_ZIP_CODE = "90210"
 SUCCESS_STATES = {"success", "partial_success"}
 DB_TIMEOUT_SECONDS = 15
+CDP_CONNECT_TIMEOUT_MS = 120_000
 
 WRITE_LOCK = threading.RLock()
 _workbook_signature: Optional[tuple[str, int, int]] = None
@@ -769,10 +770,20 @@ def active_asins() -> list[str]:
         ]
 
 
+async def connect_browser(playwright: Any) -> Any:
+    info = get_cdp_info()
+    if info is None:
+        raise RuntimeError("9222 未返回有效的 Chrome 调试信息")
+    websocket_url = str(info["webSocketDebuggerUrl"])
+    return await playwright.chromium.connect_over_cdp(
+        websocket_url, timeout=CDP_CONNECT_TIMEOUT_MS
+    )
+
+
 async def do_crawl(asins: list[str]) -> None:
     status.update(
         running=True,
-        message="正在连接插件浏览器",
+        message="正在连接插件浏览器（首次连接最多等待 120 秒）",
         success=0,
         partial=0,
         failed=0,
@@ -788,7 +799,7 @@ async def do_crawl(asins: list[str]) -> None:
 
         async with async_playwright() as playwright:
             try:
-                browser = await playwright.chromium.connect_over_cdp(CDP_ENDPOINT)
+                browser = await connect_browser(playwright)
                 if not browser.contexts:
                     raise RuntimeError("插件浏览器没有可用的浏览器上下文")
             except Exception as exc:
