@@ -22,12 +22,14 @@ if errorlevel 1 goto :failed
 echo.
 echo 首次安装完成。
 echo 以后日常使用时，只需运行“启动插件浏览器.bat”和“启动程序.bat”。
+if defined CI exit /b 0
 pause
 goto :end
 
 :failed
 echo.
 echo 首次安装失败，请阅读上方错误信息。
+if defined CI exit /b 1
 pause
 
 :end
