@@ -43,15 +43,16 @@ $arguments = '-m uvicorn app.main:app --host 127.0.0.1 --port 8787'
 Write-Host '正在后台启动程序服务...'
 
 try {
-    $process = Start-Process \
-        -FilePath $python \
-        -ArgumentList $arguments \
-        -WorkingDirectory $script:ProjectRoot \
-        -WindowStyle Hidden \
-        -RedirectStandardOutput $stdoutLog \
-        -RedirectStandardError $stderrLog \
-        -PassThru
-
+    $startParameters = @{
+        FilePath = $python
+        ArgumentList = $arguments
+        WorkingDirectory = $script:ProjectRoot
+        WindowStyle = 'Hidden'
+        RedirectStandardOutput = $stdoutLog
+        RedirectStandardError = $stderrLog
+        PassThru = $true
+    }
+    $process = Start-Process @startParameters
     [System.IO.File]::WriteAllText($pidFile, [string]$process.Id, [System.Text.Encoding]::ASCII)
 }
 catch {
@@ -85,7 +86,7 @@ $tail = ''
 if (Test-Path -LiteralPath $stderrLog) {
     $tail = (Get-Content -LiteralPath $stderrLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
 }
-$message = "服务在 45 秒内没有准备完成。"
+$message = '服务在 45 秒内没有准备完成。'
 if ($tail) {
     $message += "`n`n最近错误：`n$tail"
 }
