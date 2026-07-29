@@ -13,6 +13,7 @@ set "APP_PID_FILE=%PID_FILE%"
 
 if not exist "%PY%" (
   echo 尚未完成首次安装，请先双击“首次安装.bat”。
+  if defined CI exit /b 1
   pause
   exit /b 1
 )
@@ -46,6 +47,7 @@ curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/st
 exit /b %errorlevel%
 
 :ready
+if defined CI exit /b 0
 start "" "http://127.0.0.1:8787"
 exit /b 0
 
@@ -60,5 +62,6 @@ if exist "data\server-error.log" (
 )
 echo.
 echo 请运行“故障检查.bat”，不要关闭 Chrome。
+if defined CI exit /b 1
 pause
 exit /b 1
