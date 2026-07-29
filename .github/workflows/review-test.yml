@@ -34,7 +34,7 @@ jobs:
         run: python -m compileall -q app tests
 
       - name: Pytest
-        run: pytest -q
+        run: python -m pytest -q
 
       - name: Fatal Python lint checks
         run: ruff check app tests --select E9,F63,F7,F82
