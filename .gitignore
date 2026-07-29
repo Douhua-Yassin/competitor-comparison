@@ -3,6 +3,11 @@ node_modules/
 .pytest_cache/
 __pycache__/
 
+data/
+*.db
+*.log
+*.pid
+
 flatten-code.cjs
 *.json
 project_summary*.md
