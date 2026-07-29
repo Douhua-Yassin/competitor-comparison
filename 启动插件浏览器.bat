@@ -1,5 +1,6 @@
 @echo off
 setlocal
+chcp 65001 >nul
 set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
@@ -10,13 +11,17 @@ if not exist "%CHROME%" (
 )
 netstat -ano | findstr ":9222 .*LISTENING" >nul
 if not errorlevel 1 (
-  echo 插件浏览器已经启动，9222 端口可用。
+  echo ========================================
+  echo 插件浏览器已经启动。
+  echo 9222 端口可用，可以直接运行监控程序。
+  echo ========================================
+  pause
   exit /b 0
 )
 tasklist /FI "IMAGENAME eq chrome.exe" | find /I "chrome.exe" >nul
 if not errorlevel 1 (
-  echo 请先保存工作并完全退出所有 Chrome，再重新运行本文件。
-  echo 已经运行的 Chrome 无法临时追加 9222 参数。
+  echo 请先完全退出当前 Chrome。
+  echo 当前 Chrome 没有开启 9222，无法追加调试端口。
   pause
   exit /b 1
 )
@@ -25,11 +30,14 @@ start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%
 for /l %%i in (1,1,20) do (
   powershell -NoProfile -Command "try { Invoke-RestMethod http://127.0.0.1:9222/json/version -TimeoutSec 1 ^| Out-Null; exit 0 } catch { exit 1 }"
   if not errorlevel 1 (
-    echo 插件浏览器启动成功。请保持 Chrome 开启。
+    echo 插件浏览器启动成功。
+    echo 请保持 Chrome 开启。
+    pause
     exit /b 0
   )
   timeout /t 1 /nobreak >nul
 )
-echo Chrome 已打开，但 9222 端口没有响应。请运行“故障检查.bat”。
+echo Chrome 已打开，但 9222 端口没有响应。
+echo 请运行“故障检查.bat”。
 pause
 exit /b 1
