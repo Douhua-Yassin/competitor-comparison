@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sqlite3
+import threading
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -26,11 +29,17 @@ CDP_ENDPOINT = "http://127.0.0.1:9222"
 SELLER_SPRITE_WAIT_SECONDS = 30
 DELIVERY_ZIP_CODE = "90210"
 SUCCESS_STATES = {"success", "partial_success"}
+DB_TIMEOUT_SECONDS = 15
+
+WRITE_LOCK = threading.RLock()
+_workbook_signature: Optional[tuple[str, int, int]] = None
+_last_sync_result: Optional[dict[str, Any]] = None
 
 status: dict[str, Any] = {
     "running": False,
     "message": "idle",
     "success": 0,
+    "partial": 0,
     "failed": 0,
     "total": 0,
     "current_asin": None,
@@ -41,105 +50,114 @@ status: dict[str, Any] = {
     "sync_error": None,
 }
 
-app = FastAPI(title="Amazon Competitor Monitor")
-app.mount("/static", StaticFiles(directory=ROOT / "app" / "static"), name="static")
-templates = Jinja2Templates(directory=ROOT / "app" / "templates")
-
 
 class WorkbookSyncError(RuntimeError):
     pass
 
 
+class DatabaseWriteError(RuntimeError):
+    pass
+
+
+def reset_sync_cache() -> None:
+    global _workbook_signature, _last_sync_result
+    _workbook_signature = None
+    _last_sync_result = None
+
+
 def connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS)
     db.row_factory = sqlite3.Row
+    db.execute(f"PRAGMA busy_timeout = {DB_TIMEOUT_SECONDS * 1000}")
     db.execute("PRAGMA foreign_keys = ON")
     return db
 
 
 def init_db() -> None:
-    with connection() as db:
-        db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS products (
-              asin TEXT PRIMARY KEY,
-              brand TEXT,
-              size_raw TEXT,
-              size_normalized TEXT,
-              is_self BOOLEAN,
-              input_rating_text TEXT,
-              input_rating_value REAL,
-              input_review_count INTEGER,
-              input_price REAL,
-              enabled BOOLEAN NOT NULL DEFAULT 1,
-              created_at DATETIME NOT NULL,
-              updated_at DATETIME NOT NULL
-            );
+    with WRITE_LOCK:
+        with connection() as db:
+            db.execute("PRAGMA journal_mode = WAL")
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS products (
+                  asin TEXT PRIMARY KEY,
+                  brand TEXT,
+                  size_raw TEXT,
+                  size_normalized TEXT,
+                  is_self BOOLEAN,
+                  input_rating_text TEXT,
+                  input_rating_value REAL,
+                  input_review_count INTEGER,
+                  input_price REAL,
+                  enabled BOOLEAN NOT NULL DEFAULT 1,
+                  created_at DATETIME NOT NULL,
+                  updated_at DATETIME NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS product_lines (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL UNIQUE,
-              sheet_order INTEGER NOT NULL,
-              active BOOLEAN NOT NULL DEFAULT 1,
-              created_at DATETIME NOT NULL,
-              updated_at DATETIME NOT NULL
-            );
+                CREATE TABLE IF NOT EXISTS product_lines (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL UNIQUE,
+                  sheet_order INTEGER NOT NULL,
+                  active BOOLEAN NOT NULL DEFAULT 1,
+                  created_at DATETIME NOT NULL,
+                  updated_at DATETIME NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS product_line_items (
-              product_line_id INTEGER NOT NULL,
-              asin TEXT NOT NULL,
-              brand TEXT,
-              size_raw TEXT,
-              size_normalized TEXT,
-              is_self BOOLEAN NOT NULL DEFAULT 0,
-              input_rating_text TEXT,
-              input_rating_value REAL,
-              input_review_count INTEGER,
-              input_price REAL,
-              item_order INTEGER NOT NULL,
-              active BOOLEAN NOT NULL DEFAULT 1,
-              created_at DATETIME NOT NULL,
-              updated_at DATETIME NOT NULL,
-              PRIMARY KEY(product_line_id, asin),
-              FOREIGN KEY(product_line_id) REFERENCES product_lines(id),
-              FOREIGN KEY(asin) REFERENCES products(asin)
-            );
+                CREATE TABLE IF NOT EXISTS product_line_items (
+                  product_line_id INTEGER NOT NULL,
+                  asin TEXT NOT NULL,
+                  brand TEXT,
+                  size_raw TEXT,
+                  size_normalized TEXT,
+                  is_self BOOLEAN NOT NULL DEFAULT 0,
+                  input_rating_text TEXT,
+                  input_rating_value REAL,
+                  input_review_count INTEGER,
+                  input_price REAL,
+                  item_order INTEGER NOT NULL,
+                  active BOOLEAN NOT NULL DEFAULT 1,
+                  created_at DATETIME NOT NULL,
+                  updated_at DATETIME NOT NULL,
+                  PRIMARY KEY(product_line_id, asin),
+                  FOREIGN KEY(product_line_id) REFERENCES product_lines(id),
+                  FOREIGN KEY(asin) REFERENCES products(asin)
+                );
 
-            CREATE TABLE IF NOT EXISTS crawl_records (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              asin TEXT NOT NULL,
-              record_date DATE NOT NULL,
-              captured_at DATETIME NOT NULL,
-              price REAL,
-              price_text TEXT,
-              sales_text TEXT,
-              rank_text TEXT,
-              rating_value REAL,
-              review_count INTEGER,
-              crawl_status TEXT NOT NULL,
-              error_message TEXT,
-              source TEXT NOT NULL CHECK(source IN ('live','fixture')),
-              data_source TEXT,
-              seller_sprite_status TEXT,
-              delivery_status TEXT,
-              FOREIGN KEY(asin) REFERENCES products(asin)
-            );
+                CREATE TABLE IF NOT EXISTS crawl_records (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  asin TEXT NOT NULL,
+                  record_date DATE NOT NULL,
+                  captured_at DATETIME NOT NULL,
+                  price REAL,
+                  price_text TEXT,
+                  sales_text TEXT,
+                  rank_text TEXT,
+                  rating_value REAL,
+                  review_count INTEGER,
+                  crawl_status TEXT NOT NULL,
+                  error_message TEXT,
+                  source TEXT NOT NULL CHECK(source IN ('live','fixture')),
+                  data_source TEXT,
+                  seller_sprite_status TEXT,
+                  delivery_status TEXT,
+                  FOREIGN KEY(asin) REFERENCES products(asin)
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_crawl_asin_date
-              ON crawl_records(asin, record_date, captured_at);
-            CREATE INDEX IF NOT EXISTS idx_line_items_active
-              ON product_line_items(product_line_id, active, item_order);
-            """
-        )
-        existing = {row[1] for row in db.execute("PRAGMA table_info(crawl_records)")}
-        for definition in (
-            "data_source TEXT",
-            "seller_sprite_status TEXT",
-            "delivery_status TEXT",
-        ):
-            if definition.split()[0] not in existing:
-                db.execute("ALTER TABLE crawl_records ADD COLUMN " + definition)
+                CREATE INDEX IF NOT EXISTS idx_crawl_asin_date
+                  ON crawl_records(asin, record_date, captured_at);
+                CREATE INDEX IF NOT EXISTS idx_line_items_active
+                  ON product_line_items(product_line_id, active, item_order);
+                """
+            )
+            existing = {row[1] for row in db.execute("PRAGMA table_info(crawl_records)")}
+            for definition in (
+                "data_source TEXT",
+                "seller_sprite_status TEXT",
+                "delivery_status TEXT",
+            ):
+                if definition.split()[0] not in existing:
+                    db.execute("ALTER TABLE crawl_records ADD COLUMN " + definition)
 
 
 def normalize_size(value: Any) -> Optional[str]:
@@ -171,6 +189,13 @@ def as_price(value: Any) -> Optional[float]:
 
 def parse_is_self(value: Any) -> bool:
     return str(value or "").strip().lower() in {"是", "yes", "true", "1", "y"}
+
+
+def workbook_signature(path: Path) -> tuple[str, int, int]:
+    if not path.exists():
+        raise WorkbookSyncError(f"未找到产品输入表：{path.name}")
+    stat = path.stat()
+    return (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
 
 
 def _read_workbook(path: Path) -> list[dict[str, Any]]:
@@ -220,109 +245,129 @@ def _read_workbook(path: Path) -> list[dict[str, Any]]:
     return lines
 
 
-def sync_workbook(path: Optional[Path] = None) -> dict[str, Any]:
-    init_db()
+def _read_stable_workbook(path: Path) -> tuple[tuple[str, int, int], list[dict[str, Any]]]:
+    first_signature = workbook_signature(path)
+    lines = _read_workbook(path)
+    second_signature = workbook_signature(path)
+    if first_signature == second_signature:
+        return second_signature, lines
+    lines = _read_workbook(path)
+    return workbook_signature(path), lines
+
+
+def sync_workbook(path: Optional[Path] = None, force: bool = False) -> dict[str, Any]:
+    global _workbook_signature, _last_sync_result
+
     workbook_path = path or INPUT_PATH
-    lines = _read_workbook(workbook_path)
+    current_signature = workbook_signature(workbook_path)
+    if not force and current_signature == _workbook_signature and _last_sync_result:
+        return dict(_last_sync_result)
+
+    signature, lines = _read_stable_workbook(workbook_path)
     now = datetime.now().isoformat(timespec="seconds")
     unique_items: dict[str, dict[str, Any]] = {}
     for line in lines:
         for item in line["items"]:
             unique_items.setdefault(item["asin"], item)
 
-    with connection() as db:
-        db.execute("UPDATE product_lines SET active=0, updated_at=?", (now,))
-        db.execute("UPDATE product_line_items SET active=0, updated_at=?", (now,))
-        db.execute("UPDATE products SET enabled=0, updated_at=?", (now,))
+    with WRITE_LOCK:
+        init_db()
+        try:
+            with connection() as db:
+                db.execute("UPDATE product_lines SET active=0, updated_at=?", (now,))
+                db.execute("UPDATE product_line_items SET active=0, updated_at=?", (now,))
+                db.execute("UPDATE products SET enabled=0, updated_at=?", (now,))
 
-        for asin, item in unique_items.items():
-            db.execute(
-                """
-                INSERT INTO products (
-                  asin, brand, size_raw, size_normalized, is_self,
-                  input_rating_text, input_rating_value, input_review_count,
-                  input_price, enabled, created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
-                ON CONFLICT(asin) DO UPDATE SET
-                  brand=excluded.brand,
-                  size_raw=excluded.size_raw,
-                  size_normalized=excluded.size_normalized,
-                  is_self=excluded.is_self,
-                  input_rating_text=excluded.input_rating_text,
-                  input_rating_value=excluded.input_rating_value,
-                  input_review_count=excluded.input_review_count,
-                  input_price=excluded.input_price,
-                  enabled=1,
-                  updated_at=excluded.updated_at
-                """,
-                (
-                    asin,
-                    item["brand"],
-                    item["size_raw"],
-                    item["size_normalized"],
-                    item["is_self"],
-                    item["input_rating_text"],
-                    item["input_rating_value"],
-                    item["input_review_count"],
-                    item["input_price"],
-                    now,
-                    now,
-                ),
-            )
+                for asin, item in unique_items.items():
+                    db.execute(
+                        """
+                        INSERT INTO products (
+                          asin, brand, size_raw, size_normalized, is_self,
+                          input_rating_text, input_rating_value, input_review_count,
+                          input_price, enabled, created_at, updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
+                        ON CONFLICT(asin) DO UPDATE SET
+                          brand=excluded.brand,
+                          size_raw=excluded.size_raw,
+                          size_normalized=excluded.size_normalized,
+                          is_self=excluded.is_self,
+                          input_rating_text=excluded.input_rating_text,
+                          input_rating_value=excluded.input_rating_value,
+                          input_review_count=excluded.input_review_count,
+                          input_price=excluded.input_price,
+                          enabled=1,
+                          updated_at=excluded.updated_at
+                        """,
+                        (
+                            asin,
+                            item["brand"],
+                            item["size_raw"],
+                            item["size_normalized"],
+                            item["is_self"],
+                            item["input_rating_text"],
+                            item["input_rating_value"],
+                            item["input_review_count"],
+                            item["input_price"],
+                            now,
+                            now,
+                        ),
+                    )
 
-        for line in lines:
-            db.execute(
-                """
-                INSERT INTO product_lines (name, sheet_order, active, created_at, updated_at)
-                VALUES (?, ?, 1, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                  sheet_order=excluded.sheet_order,
-                  active=1,
-                  updated_at=excluded.updated_at
-                """,
-                (line["name"], line["sheet_order"], now, now),
-            )
-            line_id = db.execute(
-                "SELECT id FROM product_lines WHERE name=?", (line["name"],)
-            ).fetchone()[0]
-            for item in line["items"]:
-                db.execute(
-                    """
-                    INSERT INTO product_line_items (
-                      product_line_id, asin, brand, size_raw, size_normalized,
-                      is_self, input_rating_text, input_rating_value,
-                      input_review_count, input_price, item_order, active,
-                      created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)
-                    ON CONFLICT(product_line_id, asin) DO UPDATE SET
-                      brand=excluded.brand,
-                      size_raw=excluded.size_raw,
-                      size_normalized=excluded.size_normalized,
-                      is_self=excluded.is_self,
-                      input_rating_text=excluded.input_rating_text,
-                      input_rating_value=excluded.input_rating_value,
-                      input_review_count=excluded.input_review_count,
-                      input_price=excluded.input_price,
-                      item_order=excluded.item_order,
-                      active=1,
-                      updated_at=excluded.updated_at
-                    """,
-                    (
-                        line_id,
-                        item["asin"],
-                        item["brand"],
-                        item["size_raw"],
-                        item["size_normalized"],
-                        item["is_self"],
-                        item["input_rating_text"],
-                        item["input_rating_value"],
-                        item["input_review_count"],
-                        item["input_price"],
-                        item["item_order"],
-                        now,
-                        now,
-                    ),
-                )
+                for line in lines:
+                    db.execute(
+                        """
+                        INSERT INTO product_lines (name, sheet_order, active, created_at, updated_at)
+                        VALUES (?, ?, 1, ?, ?)
+                        ON CONFLICT(name) DO UPDATE SET
+                          sheet_order=excluded.sheet_order,
+                          active=1,
+                          updated_at=excluded.updated_at
+                        """,
+                        (line["name"], line["sheet_order"], now, now),
+                    )
+                    line_id = db.execute(
+                        "SELECT id FROM product_lines WHERE name=?", (line["name"],)
+                    ).fetchone()[0]
+                    for item in line["items"]:
+                        db.execute(
+                            """
+                            INSERT INTO product_line_items (
+                              product_line_id, asin, brand, size_raw, size_normalized,
+                              is_self, input_rating_text, input_rating_value,
+                              input_review_count, input_price, item_order, active,
+                              created_at, updated_at
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+                            ON CONFLICT(product_line_id, asin) DO UPDATE SET
+                              brand=excluded.brand,
+                              size_raw=excluded.size_raw,
+                              size_normalized=excluded.size_normalized,
+                              is_self=excluded.is_self,
+                              input_rating_text=excluded.input_rating_text,
+                              input_rating_value=excluded.input_rating_value,
+                              input_review_count=excluded.input_review_count,
+                              input_price=excluded.input_price,
+                              item_order=excluded.item_order,
+                              active=1,
+                              updated_at=excluded.updated_at
+                            """,
+                            (
+                                line_id,
+                                item["asin"],
+                                item["brand"],
+                                item["size_raw"],
+                                item["size_normalized"],
+                                item["is_self"],
+                                item["input_rating_text"],
+                                item["input_rating_value"],
+                                item["input_review_count"],
+                                item["input_price"],
+                                item["item_order"],
+                                now,
+                                now,
+                            ),
+                        )
+        except sqlite3.Error as exc:
+            raise DatabaseWriteError(f"同步产品表时数据库写入失败：{exc}") from exc
 
     result = {
         "product_lines": len(lines),
@@ -330,16 +375,21 @@ def sync_workbook(path: Optional[Path] = None) -> dict[str, Any]:
         "unique_asins": len(unique_items),
         "synced_at": now,
     }
+    _workbook_signature = signature
+    _last_sync_result = dict(result)
     status.update(last_sync=now, sync_error=None)
     return result
 
 
-def sync_or_raise() -> dict[str, Any]:
+def sync_or_raise(force: bool = False) -> dict[str, Any]:
     try:
-        return sync_workbook()
+        return sync_workbook(force=force)
     except WorkbookSyncError as exc:
         status["sync_error"] = str(exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DatabaseWriteError as exc:
+        status["sync_error"] = str(exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def parse_amazon_html(html: str) -> dict[str, Any]:
@@ -398,8 +448,10 @@ def parse_amazon_html(html: str) -> dict[str, Any]:
         result.get(key) is not None
         for key in ("price", "sales_text", "rank_text", "rating_value", "review_count")
     )
-    result["crawl_status"] = "success" if result["price"] is not None else (
-        "partial_success" if available else "failed"
+    result["crawl_status"] = (
+        "success"
+        if result["price"] is not None
+        else ("partial_success" if available else "failed")
     )
     if not available:
         result["error_message"] = "Amazon public data was unavailable"
@@ -450,7 +502,9 @@ def parse_seller_sprite_html(html: str, asin: str) -> dict[str, Any]:
                 }
             )
     if not ranks:
-        for match in re.finditer(r"#([\d,]+)\s+in\s+(.+?)(?=\s+#|\s+近30天|$)", root_text, re.I):
+        for match in re.finditer(
+            r"#([\d,]+)\s+in\s+(.+?)(?=\s+#|\s+近30天|$)", root_text, re.I
+        ):
             ranks.append(
                 {
                     "rank": int(match.group(1).replace(",", "")),
@@ -473,6 +527,17 @@ def parse_seller_sprite_html(html: str, asin: str) -> dict[str, Any]:
         "rank_text": ranks[-1]["text"] if ranks else None,
         "size": field("Size"),
     }
+
+
+def join_messages(*messages: Optional[str]) -> Optional[str]:
+    unique: list[str] = []
+    for message in messages:
+        if not message:
+            continue
+        for part in str(message).split("; "):
+            if part and part not in unique:
+                unique.append(part)
+    return "; ".join(unique) if unique else None
 
 
 def merge_sources(amazon: dict[str, Any], sprite: dict[str, Any]) -> dict[str, Any]:
@@ -511,16 +576,19 @@ def merge_sources(amazon: dict[str, Any], sprite: dict[str, Any]) -> dict[str, A
         result.get(key) is not None
         for key in ("price", "sales_text", "rank_text", "rating_value", "review_count")
     )
-    if result.get("price") is not None and result.get("sales_text") is not None and result.get("rank_text") is not None:
+    if (
+        result.get("price") is not None
+        and result.get("sales_text") is not None
+        and result.get("rank_text") is not None
+    ):
         result["crawl_status"] = "success"
     elif available:
         result["crawl_status"] = "partial_success"
     else:
         result["crawl_status"] = amazon.get("crawl_status", "failed")
 
-    if warnings:
-        result["error_message"] = "; ".join(warnings)
-    elif result["crawl_status"] in SUCCESS_STATES:
+    result["error_message"] = join_messages(amazon.get("error_message"), *warnings)
+    if result["crawl_status"] in SUCCESS_STATES and not result["error_message"]:
         result["error_message"] = None
     return result
 
@@ -558,40 +626,62 @@ async def set_delivery_location(page: Any) -> str:
         return "delivery_location_failed: " + str(exc)[:180]
 
 
+def failed_result(code: str, exc: Exception | str) -> dict[str, Any]:
+    return {
+        "crawl_status": "failed",
+        "error_message": f"{code}: {str(exc)[:500]}",
+        "seller_sprite_status": "unavailable",
+        "data_source": "none",
+    }
+
+
 async def crawl_product(asin: str, context: Any, delivery_state: dict[str, str]) -> dict[str, Any]:
     captured_at = datetime.now().isoformat(timespec="seconds")
     page = None
     result: dict[str, Any]
     try:
-        page = await context.new_page()
-        await page.goto(
-            f"https://www.amazon.com/dp/{asin}",
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
-        if delivery_state["value"] == "unknown":
-            delivery_state["value"] = await set_delivery_location(page)
-            status["delivery_status"] = delivery_state["value"]
-
-        amazon = parse_amazon_html(await page.content())
-        sprite: dict[str, Any] = {"seller_sprite_status": "unavailable"}
-        selector = f'[name="seller-sprite-extension-quick-view-{asin}"]'
         try:
-            root = page.locator(selector)
-            await root.wait_for(state="attached", timeout=SELLER_SPRITE_WAIT_SECONDS * 1000)
-            sprite = parse_seller_sprite_html(await root.evaluate("el => el.outerHTML"), asin)
-        except Exception:
-            sprite = {"seller_sprite_status": "unavailable"}
+            page = await context.new_page()
+        except Exception as exc:
+            result = failed_result("page_create_failed", exc)
+        else:
+            try:
+                await page.goto(
+                    f"https://www.amazon.com/dp/{asin}",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+            except Exception as exc:
+                result = failed_result("page_load_failed", exc)
+            else:
+                if delivery_state["value"] == "unknown":
+                    delivery_state["value"] = await set_delivery_location(page)
+                    status["delivery_status"] = delivery_state["value"]
 
-        result = merge_sources(amazon, sprite)
-        status["seller_sprite_status"] = result.get("seller_sprite_status", "unknown")
+                try:
+                    amazon = parse_amazon_html(await page.content())
+                except Exception as exc:
+                    result = failed_result("parse_failed", exc)
+                else:
+                    sprite: dict[str, Any] = {"seller_sprite_status": "unavailable"}
+                    selector = f'[name="seller-sprite-extension-quick-view-{asin}"]'
+                    try:
+                        root = page.locator(selector)
+                        await root.wait_for(
+                            state="attached", timeout=SELLER_SPRITE_WAIT_SECONDS * 1000
+                        )
+                        sprite = parse_seller_sprite_html(
+                            await root.evaluate("el => el.outerHTML"), asin
+                        )
+                    except Exception:
+                        sprite = {"seller_sprite_status": "unavailable"}
+
+                    result = merge_sources(amazon, sprite)
+                    status["seller_sprite_status"] = result.get(
+                        "seller_sprite_status", "unknown"
+                    )
     except Exception as exc:
-        result = {
-            "crawl_status": "failed",
-            "error_message": str(exc)[:500],
-            "seller_sprite_status": "unavailable",
-            "data_source": "none",
-        }
+        result = failed_result("crawl_failed", exc)
     finally:
         if page is not None:
             try:
@@ -604,56 +694,78 @@ async def crawl_product(asin: str, context: Any, delivery_state: dict[str, str])
         captured_at=captured_at,
         delivery_status=delivery_state["value"],
     )
-    save_record(result, "live")
+    try:
+        save_record(result, "live")
+        result["persisted"] = True
+    except DatabaseWriteError as exc:
+        result["persisted"] = False
+        result["crawl_status"] = "failed"
+        result["error_message"] = join_messages(
+            result.get("error_message"), f"database_write_failed: {exc}"
+        )
     return result
 
 
 def save_record(record: dict[str, Any], source: str) -> None:
-    with connection() as db:
-        db.execute(
-            """
-            INSERT INTO crawl_records (
-              asin, record_date, captured_at, price, price_text, sales_text,
-              rank_text, rating_value, review_count, crawl_status,
-              error_message, source, data_source, seller_sprite_status,
-              delivery_status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                record["asin"],
-                record["captured_at"][:10],
-                record["captured_at"],
-                record.get("price"),
-                record.get("price_text"),
-                record.get("sales_text"),
-                record.get("rank_text"),
-                record.get("rating_value"),
-                record.get("review_count"),
-                record["crawl_status"],
-                record.get("error_message"),
-                source,
-                record.get("data_source"),
-                record.get("seller_sprite_status"),
-                record.get("delivery_status"),
-            ),
-        )
+    with WRITE_LOCK:
+        try:
+            with connection() as db:
+                db.execute(
+                    """
+                    INSERT INTO crawl_records (
+                      asin, record_date, captured_at, price, price_text, sales_text,
+                      rank_text, rating_value, review_count, crawl_status,
+                      error_message, source, data_source, seller_sprite_status,
+                      delivery_status
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        record["asin"],
+                        record["captured_at"][:10],
+                        record["captured_at"],
+                        record.get("price"),
+                        record.get("price_text"),
+                        record.get("sales_text"),
+                        record.get("rank_text"),
+                        record.get("rating_value"),
+                        record.get("review_count"),
+                        record["crawl_status"],
+                        record.get("error_message"),
+                        source,
+                        record.get("data_source"),
+                        record.get("seller_sprite_status"),
+                        record.get("delivery_status"),
+                    ),
+                )
+        except sqlite3.Error as exc:
+            raise DatabaseWriteError(str(exc)) from exc
+
+
+def get_cdp_info(endpoint: str = CDP_ENDPOINT) -> Optional[dict[str, Any]]:
+    try:
+        with urllib.request.urlopen(endpoint + "/json/version", timeout=2) as response:
+            if response.status != 200:
+                return None
+            payload = json.load(response)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    browser_name = str(payload.get("Browser", ""))
+    if not re.search(r"(?:Chrome|Chromium)/", browser_name, re.I):
+        return None
+    if not payload.get("webSocketDebuggerUrl"):
+        return None
+    return payload
 
 
 def check_cdp_available(endpoint: str = CDP_ENDPOINT) -> bool:
-    try:
-        with urllib.request.urlopen(endpoint + "/json/version", timeout=2) as response:
-            return response.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
+    return get_cdp_info(endpoint) is not None
 
 
 def active_asins() -> list[str]:
     with connection() as db:
         return [
             row[0]
-            for row in db.execute(
-                "SELECT asin FROM products WHERE enabled=1 ORDER BY asin"
-            )
+            for row in db.execute("SELECT asin FROM products WHERE enabled=1 ORDER BY asin")
         ]
 
 
@@ -662,6 +774,7 @@ async def do_crawl(asins: list[str]) -> None:
         running=True,
         message="正在连接插件浏览器",
         success=0,
+        partial=0,
         failed=0,
         total=len(asins),
         current_asin=None,
@@ -674,27 +787,51 @@ async def do_crawl(asins: list[str]) -> None:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.connect_over_cdp(CDP_ENDPOINT)
-            if not browser.contexts:
-                raise RuntimeError("插件浏览器没有可用的浏览器上下文")
+            try:
+                browser = await playwright.chromium.connect_over_cdp(CDP_ENDPOINT)
+                if not browser.contexts:
+                    raise RuntimeError("插件浏览器没有可用的浏览器上下文")
+            except Exception as exc:
+                status.update(
+                    browser_status="connection_failed",
+                    message="插件浏览器连接失败：" + str(exc)[:300],
+                )
+                return
+
             context = browser.contexts[0]
             status["browser_status"] = "connected"
             for asin in asins:
                 status.update(current_asin=asin, message=f"正在抓取 {asin}")
-                result = await crawl_product(asin, context, delivery_state)
-                if result["crawl_status"] in SUCCESS_STATES:
+                try:
+                    result = await crawl_product(asin, context, delivery_state)
+                except Exception as exc:
+                    status["failed"] += 1
+                    status["message"] = f"{asin} 抓取失败：crawl_failed: {str(exc)[:180]}"
+                    continue
+                if result["crawl_status"] == "success":
                     status["success"] += 1
+                elif result["crawl_status"] == "partial_success":
+                    status["partial"] += 1
                 else:
                     status["failed"] += 1
     except Exception as exc:
-        status.update(
-            browser_status="connection_failed",
-            message="插件浏览器连接失败：" + str(exc)[:300],
-        )
+        if status["browser_status"] != "connected":
+            status.update(
+                browser_status="connection_failed",
+                message="插件浏览器连接失败：" + str(exc)[:300],
+            )
+        else:
+            status["message"] = "抓取任务异常：" + str(exc)[:300]
     finally:
         status.update(running=False, current_asin=None)
         if status["browser_status"] == "connected":
-            status.update(browser_status="connected", message="抓取完成")
+            status.update(
+                browser_status="connected",
+                message=(
+                    f"抓取完成：成功 {status['success']}，"
+                    f"部分成功 {status['partial']}，失败 {status['failed']}"
+                ),
+            )
 
 
 def _line_rows(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -818,28 +955,34 @@ def table_data(range_name: str, product_line_id: Optional[int] = None) -> dict[s
     }
 
 
-@app.on_event("startup")
-def startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     init_db()
     try:
-        sync_workbook()
-    except WorkbookSyncError as exc:
+        sync_workbook(force=True)
+    except (WorkbookSyncError, DatabaseWriteError) as exc:
         status["sync_error"] = str(exc)
         status["message"] = str(exc)
+    yield
+
+
+app = FastAPI(title="Amazon Competitor Monitor", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=ROOT / "app" / "static"), name="static")
+templates = Jinja2Templates(directory=ROOT / "app" / "templates")
 
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     try:
         sync_workbook()
-    except WorkbookSyncError as exc:
+    except (WorkbookSyncError, DatabaseWriteError) as exc:
         status["sync_error"] = str(exc)
     return templates.TemplateResponse(request, "index.html", {})
 
 
 @app.post("/api/sync")
 def api_sync():
-    return sync_or_raise()
+    return sync_or_raise(force=True)
 
 
 @app.post("/api/crawl")
