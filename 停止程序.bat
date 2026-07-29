@@ -16,6 +16,7 @@ set /p SERVER_PID=<"%PID_FILE%"
 for /f "delims=0123456789" %%a in ("!SERVER_PID!") do set "INVALID_PID=1"
 if defined INVALID_PID (
   echo server.pid 内容无效：!SERVER_PID!
+  if defined CI exit /b 1
   pause
   exit /b 1
 )
@@ -38,21 +39,28 @@ if "!STOP_RESULT!"=="2" (
 
 if "!STOP_RESULT!"=="3" (
   echo 拒绝停止：PID !SERVER_PID! 的命令行不属于本监控程序。
+  if defined CI exit /b 1
   pause
   exit /b 1
 )
 
 if "!STOP_RESULT!"=="4" (
   echo 拒绝停止：PID !SERVER_PID! 不属于当前项目的 .venv。
+  if defined CI exit /b 1
   pause
   exit /b 1
 )
 
 echo 无法停止程序服务，进程号：!SERVER_PID!
+if defined CI exit /b 1
 pause
 exit /b 1
 
 :notify
+if defined CI (
+  echo %~1
+  exit /b 0
+)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show('%~1','Amazon 竞品监控',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)"
 if errorlevel 1 (
   echo %~1
