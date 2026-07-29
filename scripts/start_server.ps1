@@ -20,7 +20,12 @@ if ($listenerProcess) {
         exit 1
     }
 
-    $processCreated = [System.Management.ManagementDateTimeConverter]::ToDateTime($listenerProcess.CreationDate)
+    if ($listenerProcess.CreationDate -is [datetime]) {
+        $processCreated = [datetime]$listenerProcess.CreationDate
+    }
+    else {
+        $processCreated = [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$listenerProcess.CreationDate)
+    }
     $codeModified = (Get-Item -LiteralPath $mainFile).LastWriteTime
     $healthy = Test-LocalUrl -Url $statusUrl
 
