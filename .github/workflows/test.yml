@@ -58,7 +58,7 @@ jobs:
 
       - name: Dedicated Lingxing Python 3.11 environment smoke test
         if: matrix.python-version == '3.11'
-        shell: powershell
+        shell: pwsh
         run: |
           $env:CI = '1'
           $env:LINGXING_PYTHON = (Get-Command python.exe).Source
