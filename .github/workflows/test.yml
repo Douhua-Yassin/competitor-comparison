@@ -52,6 +52,8 @@ jobs:
           cmd.exe /d /c "首次安装.bat"
           if ($LASTEXITCODE -ne 0) { throw "首次安装.bat 失败：$LASTEXITCODE" }
           $py = '.\.venv\Scripts\python.exe'
+          & $py -m pip install --disable-pip-version-check --no-cache-dir -r requirements-lingxing.txt
+          if ($LASTEXITCODE -ne 0) { throw '领星可选依赖安装失败' }
           & $py -m pip install ruff
           & $py -m pip check
           & $py -c "import sys, importlib.metadata as m; print(sys.version); print('Playwright=' + m.version('playwright')); print('Lingxing=' + m.version('lingxingapi-httpx'))"
@@ -99,7 +101,8 @@ jobs:
           if ($requirements -notmatch 'playwright>=1\.48,<1\.49') {
             throw 'Playwright 未锁定到 1.48 系列'
           }
-          if ($requirements -notmatch 'lingxingapi-httpx==0\.1\.5') {
+          $lingxingRequirements = Get-Content -Raw -Encoding UTF8 'requirements-lingxing.txt'
+          if ($lingxingRequirements -notmatch 'lingxingapi-httpx==0\.1\.5') {
             throw '领星 SDK 版本未锁定'
           }
           $gitignore = Get-Content -Raw -Encoding UTF8 '.gitignore'
