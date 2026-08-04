@@ -42,6 +42,15 @@ def seed_catalog(db_path: Path) -> int:
             """,
             (line_id, now, now),
         )
+        db.execute(
+            """
+            INSERT INTO report_products (
+              product_line_id, asin, brand, size_normalized,
+              is_self, active, created_at, updated_at
+            ) VALUES (?, 'B000000001', 'COMPETITOR', '13 ft', 0, 1, ?, ?)
+            """,
+            (line_id, now, now),
+        )
     return line_id
 
 
@@ -54,6 +63,28 @@ def test_scope_and_target_versions_are_persisted(tmp_path: Path):
         db_path,
     )
     assert result["responsibility_level"] == "key"
+
+    update_scope(
+        ScopeUpdate(
+            product_line_id=line_id,
+            asin="B0D3D2W989",
+            responsibility_level="normal",
+        ),
+        db_path,
+    )
+    update_scope(
+        ScopeUpdate(
+            product_line_id=line_id,
+            asin="B0D3D2W989",
+            responsibility_level="inherit",
+        ),
+        db_path,
+    )
+    with connection(db_path) as db:
+        override = db.execute(
+            "SELECT responsibility_level FROM report_products WHERE asin='B0D3D2W989'"
+        ).fetchone()[0]
+    assert override is None
 
     payload = TargetCreate(
         period_type="month",
@@ -74,6 +105,12 @@ def test_scope_and_target_versions_are_persisted(tmp_path: Path):
     assert len(active) == 1
     assert active[0]["target_value"] == 12000
     assert [item["status"] for item in history] == ["active", "superseded"]
+
+    data = overview(db_path)
+    assert data["product_lines"][0]["product_count"] == 1
+    assert [product["asin"] for product in data["product_lines"][0]["products"]] == [
+        "B0D3D2W989"
+    ]
 
 
 def test_action_lifecycle_keeps_reason_and_result(tmp_path: Path):
@@ -128,14 +165,14 @@ def test_import_latest_audit_keeps_failures_and_normalizes_metrics(tmp_path: Pat
                 "sample_count": 1,
             },
             {
-                "key": "sp_product_reports",
+                "key": "sp_product_report",
                 "category": "广告",
                 "label": "SP商品广告报表",
                 "status": "success",
                 "sample_count": 1,
             },
             {
-                "key": "income_statement_asins",
+                "key": "income_statement_asin",
                 "category": "利润",
                 "label": "ASIN利润报表",
                 "status": "permission_denied",
@@ -161,7 +198,7 @@ def test_import_latest_audit_keeps_failures_and_normalizes_metrics(tmp_path: Pat
         ),
         encoding="utf-8",
     )
-    (sample_dir / "sp_product_reports.json").write_text(
+    (sample_dir / "sp_product_report.json").write_text(
         json.dumps(
             {
                 "data": [
@@ -192,7 +229,7 @@ def test_import_latest_audit_keeps_failures_and_normalizes_metrics(tmp_path: Pat
     assert data["last_import"]["status"] == "partial_success"
     assert data["metric_count"] == imported["metrics"]
     availability = {item["endpoint_key"]: item for item in data["availability"]}
-    assert availability["income_statement_asins"]["status"] == "permission_denied"
+    assert availability["income_statement_asin"]["status"] == "permission_denied"
 
     with sqlite3.connect(db_path) as db:
         mapped = db.execute(
