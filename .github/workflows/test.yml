@@ -106,7 +106,7 @@ jobs:
             throw '领星 SDK 版本未锁定'
           }
           $gitignore = Get-Content -Raw -Encoding UTF8 '.gitignore'
-          if ($gitignore -notmatch '(?m)^\.env$') {
+          if ($gitignore -notmatch '(?m)^\.env\r?$') {
             throw '.env 未加入 Git 忽略规则'
           }
 
