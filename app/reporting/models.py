@@ -6,6 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 ResponsibilityLevel = Literal["not_mine", "normal", "key"]
+ResponsibilityInput = Literal["not_mine", "normal", "key", "inherit"]
 PeriodType = Literal["day", "week", "month", "quarter", "year"]
 ActionStatus = Literal["planned", "in_progress", "completed", "cancelled"]
 ActionSource = Literal["user", "ai"]
@@ -14,7 +15,7 @@ ActionSource = Literal["user", "ai"]
 class ScopeUpdate(BaseModel):
     product_line_id: int = Field(gt=0)
     asin: Optional[str] = None
-    responsibility_level: ResponsibilityLevel
+    responsibility_level: ResponsibilityInput
 
     @field_validator("asin")
     @classmethod
