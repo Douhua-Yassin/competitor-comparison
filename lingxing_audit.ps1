@@ -83,8 +83,18 @@ if ($VersionText -ne '3.11') {
     exit 1
 }
 
-& $Python -c "import importlib.metadata as m; import dotenv, lingxingapi_httpx; raise SystemExit(0 if m.version('lingxingapi-httpx') == '0.1.5' else 1)" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$DependencyCheckCode = 1
+$PreviousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'SilentlyContinue'
+    & $Python -c "import importlib.metadata as m; import dotenv, lingxingapi_httpx; raise SystemExit(0 if m.version('lingxingapi-httpx') == '0.1.5' else 1)" 2>$null
+    $DependencyCheckCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $PreviousErrorActionPreference
+}
+
+if ($DependencyCheckCode -ne 0) {
     Write-Host '正在安装领星接口盘点依赖……'
     & $Python -m pip install --disable-pip-version-check --no-cache-dir -r $OptionalRequirements
     if ($LASTEXITCODE -ne 0) {
