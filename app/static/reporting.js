@@ -90,7 +90,7 @@ function renderAvailability() {
 function levelOptions(selected, allowInherit = false) {
   const options = [];
   if (allowInherit) {
-    options.push(`<option value="" ${selected == null ? "selected" : ""}>继承产品线</option>`);
+    options.push(`<option value="inherit" ${selected == null ? "selected" : ""}>继承产品线</option>`);
   }
   for (const [value, label] of Object.entries(levelLabels)) {
     options.push(`<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`);
@@ -112,7 +112,7 @@ function renderProductLines() {
         <div class="product-line-header">
           <div>
             <h3>${escapeHtml(line.name)}</h3>
-            <small>${line.product_count} 个产品 · ${line.target_count} 个有效目标 · ${line.open_action_count} 个待办行动</small>
+            <small>${line.product_count} 个我方产品 · ${line.target_count} 个有效目标 · ${line.open_action_count} 个待办行动</small>
           </div>
           <select data-scope-line="${line.id}" aria-label="${escapeHtml(line.name)}产品线档位">
             ${levelOptions(line.responsibility_level)}
@@ -125,7 +125,7 @@ function renderProductLines() {
               .map(
                 (product) => `
                 <tr>
-                  <td>${escapeHtml(product.asin)}${product.is_self ? " · 我方" : ""}</td>
+                  <td>${escapeHtml(product.asin)} · 我方</td>
                   <td>${escapeHtml(product.brand || "-")}</td>
                   <td>${escapeHtml(product.size_normalized || "-")}</td>
                   <td>
@@ -149,16 +149,11 @@ function renderProductLines() {
   });
   root.querySelectorAll("[data-scope-product]").forEach((select) => {
     select.addEventListener("change", async () => {
-      const line = lineById(select.dataset.scopeProduct);
-      const inherited = line?.responsibility_level || "not_mine";
       await saveScope(
         Number(select.dataset.scopeProduct),
         select.dataset.asin,
-        select.value || inherited,
+        select.value,
       );
-      if (!select.value) {
-        await reload();
-      }
     });
   });
 }
