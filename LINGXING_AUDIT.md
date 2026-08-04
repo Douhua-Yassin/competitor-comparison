@@ -14,6 +14,12 @@
 - 广告账号及 SP 商品广告报表；
 - ASIN 利润报表。
 
+## 运行环境
+
+领星接口盘点使用独立的可选 SDK，要求当前项目虚拟环境为 Python 3.10 或更高版本。原有竞品监控依赖仍保存在 `requirements.txt`，领星 SDK 单独保存在 `requirements-lingxing.txt`，因此领星依赖安装失败不会改变原有程序的依赖定义。
+
+第一次运行 `领星接口盘点.bat` 时，脚本会检查 Python 版本并按需安装领星 SDK。已安装后不会重复安装。
+
 ## 配置
 
 在项目根目录 `.env` 中填写：
@@ -69,7 +75,7 @@ data\lingxing_audit\YYYYMMDD-HHMMSS\
 - `samples\*.json`：每个成功接口的脱敏样本；
 - `latest.txt`：最近一次运行编号。
 
-Token、AppSecret、签名和其他敏感字段会在写盘前替换为 `***redacted***`。
+Token、AppSecret、签名和其他敏感字段会在写盘前替换为 `***redacted***`。客户端初始化或接口调用错误中出现的真实 AppID/AppSecret 也会在写入报告前替换。
 
 ## 状态含义
 
