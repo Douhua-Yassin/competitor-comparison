@@ -58,13 +58,13 @@ jobs:
 
       - name: Dedicated Lingxing Python 3.11 environment smoke test
         if: matrix.python-version == '3.11'
-        shell: pwsh
+        shell: powershell
         run: |
           $env:CI = '1'
           $env:LINGXING_PYTHON = (Get-Command python.exe).Source
           $env:LINGXING_AUDIT_SETUP_ONLY = '1'
-          cmd.exe /d /c "领星接口盘点.bat"
-          if ($LASTEXITCODE -ne 0) { throw "领星接口盘点.bat 独立环境初始化失败：$LASTEXITCODE" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lingxing_audit.ps1
+          if ($LASTEXITCODE -ne 0) { throw "领星独立环境初始化失败：$LASTEXITCODE" }
           $lingxingPython = '.\.venv-lingxing\Scripts\python.exe'
           if (-not (Test-Path $lingxingPython)) { throw '未创建 .venv-lingxing' }
           & $lingxingPython -c "import sys; assert sys.version_info[:2] == (3, 11); import dotenv, lingxingapi_httpx; import importlib.metadata as m; assert m.version('lingxingapi-httpx') == '0.1.5'; print(sys.version); print('Lingxing=' + m.version('lingxingapi-httpx'))"
@@ -83,7 +83,10 @@ jobs:
         run: .\.venv\Scripts\ruff.exe check app tests --select E9,F63,F7,F82
 
       - name: JavaScript syntax check
-        run: node --check app/static/app.js
+        shell: pwsh
+        run: |
+          node --check app/static/app.js
+          node --check app/static/reporting.js
 
       - name: Launcher wrapper checks
         shell: pwsh
@@ -95,6 +98,8 @@ jobs:
             '停止程序.bat' = 'scripts\stop_server.ps1'
             '故障检查.bat' = 'scripts\diagnose.ps1'
             '领星接口盘点.bat' = 'lingxing_audit.ps1'
+            '启动报告程序.bat' = 'scripts\start_reporting.ps1'
+            '停止报告程序.bat' = 'scripts\stop_reporting.ps1'
           }
           foreach ($entry in $mapping.GetEnumerator()) {
             if (-not (Test-Path $entry.Key)) { throw "缺少文件：$($entry.Key)" }
@@ -146,6 +151,23 @@ jobs:
           Start-Sleep -Seconds 2
           curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/status *> $null
           if ($LASTEXITCODE -eq 0) { throw '停止脚本结束后 8787 仍在监听' }
+          exit 0
+
+      - name: Real reporting service smoke test
+        shell: pwsh
+        run: |
+          $env:CI = '1'
+          cmd.exe /d /c "启动报告程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw "启动报告程序.bat 失败：$LASTEXITCODE" }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/status *> $null
+          if ($LASTEXITCODE -ne 0) { throw '报告服务启动后 8790 不可用' }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/overview *> $null
+          if ($LASTEXITCODE -ne 0) { throw '报告数据 API 不可用' }
+          cmd.exe /d /c "停止报告程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw "停止报告程序.bat 失败：$LASTEXITCODE" }
+          Start-Sleep -Seconds 2
+          curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8790/api/status *> $null
+          if ($LASTEXITCODE -eq 0) { throw '报告服务停止后 8790 仍在监听' }
           exit 0
 
       - name: Stop legacy system-Python server
