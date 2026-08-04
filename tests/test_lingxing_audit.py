@@ -45,13 +45,17 @@ class FakeApi:
         return {"data": {"records": [{"amazon_order_id": "A1", "sales": 12.5}]}}
 
 
-def test_runner_discovers_context_and_writes_reports(tmp_path: Path) -> None:
-    settings = AuditSettings(
+def build_settings(tmp_path: Path) -> AuditSettings:
+    return AuditSettings(
         app_id="abcdefghijklmnop",
-        app_secret="secret",
+        app_secret="secret-value",
         base_url="https://openapi.lingxing.com",
         output_dir=tmp_path,
     )
+
+
+def test_runner_discovers_context_and_writes_reports(tmp_path: Path) -> None:
+    settings = build_settings(tmp_path)
     probes = (
         ProbeDefinition("token", "认证", "令牌", "AccessToken", ""),
         ProbeDefinition("sellers", "基础", "店铺", "basic.Sellers", ""),
@@ -73,6 +77,20 @@ def test_runner_discovers_context_and_writes_reports(tmp_path: Path) -> None:
     assert (run_dir / "audit-report.md").exists()
     saved = json.loads((run_dir / "samples" / "token.json").read_text(encoding="utf-8"))
     assert saved["access_token"] == "***redacted***"
+
+
+def test_client_creation_failure_still_writes_redacted_report(tmp_path: Path) -> None:
+    settings = build_settings(tmp_path)
+
+    def broken_factory(**kwargs: object):
+        raise RuntimeError(f"credentials={kwargs['app_id']}:{kwargs['app_secret']}")
+
+    report = asyncio.run(AuditRunner(settings, api_factory=broken_factory, probes=()).run())
+    assert report.summary == {"error": 1}
+    report_text = (tmp_path / report.run_id / "audit-report.json").read_text(encoding="utf-8")
+    assert settings.app_id not in report_text
+    assert settings.app_secret not in report_text
+    assert "***redacted***" in report_text
 
 
 def test_serializer_extracts_nested_records_and_fields() -> None:
