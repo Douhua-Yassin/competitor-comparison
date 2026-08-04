@@ -6,3 +6,4 @@ playwright>=1.48,<1.49
 beautifulsoup4>=4.12,<5
 pytest>=8,<10
 httpx>=0.27,<1
+python-dotenv>=1,<2

@@ -29,7 +29,7 @@ jobs:
       - name: Parse PowerShell scripts with Windows PowerShell 5.1
         shell: powershell
         run: |
-          $files = Get-ChildItem scripts -Filter *.ps1
+          $files = @(Get-ChildItem scripts -Filter *.ps1) + @(Get-Item 'lingxing_audit.ps1')
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
@@ -52,9 +52,11 @@ jobs:
           cmd.exe /d /c "首次安装.bat"
           if ($LASTEXITCODE -ne 0) { throw "首次安装.bat 失败：$LASTEXITCODE" }
           $py = '.\.venv\Scripts\python.exe'
+          & $py -m pip install --disable-pip-version-check --no-cache-dir -r requirements-lingxing.txt
+          if ($LASTEXITCODE -ne 0) { throw '领星可选依赖安装失败' }
           & $py -m pip install ruff
           & $py -m pip check
-          & $py -c "import sys, importlib.metadata as m; print(sys.version); print('Playwright=' + m.version('playwright'))"
+          & $py -c "import sys, importlib.metadata as m; print(sys.version); print('Playwright=' + m.version('playwright')); print('Lingxing=' + m.version('lingxingapi-httpx'))"
 
       - name: Python compile check
         shell: pwsh
@@ -80,6 +82,7 @@ jobs:
             '启动程序.bat' = 'scripts\start_server.ps1'
             '停止程序.bat' = 'scripts\stop_server.ps1'
             '故障检查.bat' = 'scripts\diagnose.ps1'
+            '领星接口盘点.bat' = 'lingxing_audit.ps1'
           }
           foreach ($entry in $mapping.GetEnumerator()) {
             if (-not (Test-Path $entry.Key)) { throw "缺少文件：$($entry.Key)" }
@@ -97,6 +100,14 @@ jobs:
           $requirements = Get-Content -Raw -Encoding UTF8 'requirements.txt'
           if ($requirements -notmatch 'playwright>=1\.48,<1\.49') {
             throw 'Playwright 未锁定到 1.48 系列'
+          }
+          $lingxingRequirements = Get-Content -Raw -Encoding UTF8 'requirements-lingxing.txt'
+          if ($lingxingRequirements -notmatch 'lingxingapi-httpx==0\.1\.5') {
+            throw '领星 SDK 版本未锁定'
+          }
+          $gitignore = Get-Content -Raw -Encoding UTF8 '.gitignore'
+          if ($gitignore -notmatch '(?m)^\.env\r?$') {
+            throw '.env 未加入 Git 忽略规则'
           }
 
       - name: Create test workbook
