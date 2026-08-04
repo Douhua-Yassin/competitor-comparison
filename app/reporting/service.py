@@ -59,7 +59,7 @@ METRIC_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "fba_total": ("total_quantity", "stock", "inventory_quantity"),
     },
-    "sp_product_reports": {
+    "sp_product_report": {
         "impressions": ("impressions",),
         "clicks": ("clicks",),
         "ad_spend": ("spend", "cost", "advertising_cost"),
@@ -89,6 +89,8 @@ METRIC_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "roas": ("roas",),
     },
 }
+# Compatibility for audit files produced by early development builds.
+METRIC_ALIASES["sp_product_reports"] = METRIC_ALIASES["sp_product_report"]
 
 DATE_KEYS = (
     "date",
@@ -125,12 +127,12 @@ def _ensure_product(db, product_line_id: int, asin: Optional[str]) -> None:
     row = db.execute(
         """
         SELECT id FROM report_products
-        WHERE product_line_id=? AND asin=? AND active=1
+        WHERE product_line_id=? AND asin=? AND active=1 AND is_self=1
         """,
         (product_line_id, asin),
     ).fetchone()
     if row is None:
-        raise ValueError("该 ASIN 不属于当前产品线")
+        raise ValueError("该我方 ASIN 不属于当前产品线")
 
 
 def overview(db_path: Optional[Path] = None) -> dict[str, Any]:
@@ -144,7 +146,7 @@ def overview(db_path: Optional[Path] = None) -> dict[str, Any]:
                 """
                 SELECT rpl.*,
                        (SELECT COUNT(*) FROM report_products rp
-                        WHERE rp.product_line_id=rpl.id AND rp.active=1) AS product_count,
+                        WHERE rp.product_line_id=rpl.id AND rp.active=1 AND rp.is_self=1) AS product_count,
                        (SELECT COUNT(*) FROM targets t
                         WHERE t.product_line_id=rpl.id AND t.status='active') AS target_count,
                        (SELECT COUNT(*) FROM action_log a
@@ -165,8 +167,8 @@ def overview(db_path: Optional[Path] = None) -> dict[str, Any]:
                            active, responsibility_level,
                            COALESCE(responsibility_level, ?) AS effective_responsibility_level
                     FROM report_products
-                    WHERE product_line_id=? AND active=1
-                    ORDER BY is_self DESC, brand, asin
+                    WHERE product_line_id=? AND active=1 AND is_self=1
+                    ORDER BY brand, asin
                     """,
                     (line["responsibility_level"], line["id"]),
                 )
@@ -213,20 +215,18 @@ def update_scope(payload: ScopeUpdate, db_path: Optional[Path] = None) -> dict[s
             _ensure_line(db, payload.product_line_id)
             if payload.asin:
                 _ensure_product(db, payload.product_line_id, payload.asin)
+                level = None if payload.responsibility_level == "inherit" else payload.responsibility_level
                 db.execute(
                     """
                     UPDATE report_products
                     SET responsibility_level=?, updated_at=?
                     WHERE product_line_id=? AND asin=?
                     """,
-                    (
-                        payload.responsibility_level,
-                        now,
-                        payload.product_line_id,
-                        payload.asin,
-                    ),
+                    (level, now, payload.product_line_id, payload.asin),
                 )
             else:
+                if payload.responsibility_level == "inherit":
+                    raise ValueError("产品线不能使用继承档位")
                 db.execute(
                     """
                     UPDATE report_product_lines
@@ -664,7 +664,7 @@ def _line_ids_for_asin(db, asin: Optional[str]) -> list[int]:
         for row in db.execute(
             """
             SELECT product_line_id FROM report_products
-            WHERE asin=? AND active=1
+            WHERE asin=? AND active=1 AND is_self=1
             ORDER BY product_line_id
             """,
             (asin,),
