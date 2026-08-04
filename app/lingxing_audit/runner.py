@@ -49,16 +49,16 @@ class AuditRunner:
                 "当前审计 SDK 固定使用官方 OpenAPI 地址；LINGXING_BASE_URL 已记录但未覆盖 SDK 内部地址。"
             )
 
-        api = self.api_factory(
-            app_id=self.settings.app_id,
-            app_secret=self.settings.app_secret,
-            timeout=self.settings.timeout_seconds,
-            ignore_timeout=False,
-            ignore_api_limit=False,
-        )
         results: list[ProbeResult] = []
         completed: dict[str, ProbeResult] = {}
         try:
+            api = self.api_factory(
+                app_id=self.settings.app_id,
+                app_secret=self.settings.app_secret,
+                timeout=self.settings.timeout_seconds,
+                ignore_timeout=False,
+                ignore_api_limit=False,
+            )
             async with api:
                 for probe in self.probes:
                     unmet = [key for key in probe.depends_on if key not in completed]
@@ -76,18 +76,17 @@ class AuditRunner:
                     results.append(result)
                     completed[probe.key] = result
         except Exception as exc:
-            if not results:
-                results.append(
-                    ProbeResult(
-                        key="client",
-                        category="认证",
-                        label="API客户端初始化",
-                        method_path="API",
-                        status=_classify_error(exc),
-                        error_type=type(exc).__name__,
-                        message=_safe_error(exc),
-                    )
+            results.append(
+                ProbeResult(
+                    key="client",
+                    category="认证",
+                    label="API客户端初始化或会话",
+                    method_path="API",
+                    status=_classify_error(exc),
+                    error_type=type(exc).__name__,
+                    message=_safe_error(exc, self.settings),
                 )
+            )
 
         finished = datetime.now(timezone.utc)
         summary: dict[str, int] = {}
@@ -143,7 +142,7 @@ class AuditRunner:
             records = extract_records(plain)
             sample_file = sample_dir / f"{probe.key}.json"
             sample_file.write_text(
-                json.dumps(plain, ensure_ascii=False, indent=2)[:500_000],
+                json.dumps(plain, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             self._update_context(probe.key, plain)
@@ -169,7 +168,7 @@ class AuditRunner:
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 parameters_used=redact(params),
                 error_type=type(exc).__name__,
-                message=_safe_error(exc),
+                message=_safe_error(exc, self.settings),
             )
 
     def _update_context(self, key: str, payload: Any) -> None:
@@ -222,9 +221,15 @@ def _build_parameters(
     }
     params: dict[str, Any] = {}
     required: list[str] = []
-    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
     for name, parameter in signature.parameters.items():
-        if name == "self" or parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+        if name == "self" or parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
             continue
         value = candidates.get(name)
         if value is not None:
@@ -270,8 +275,12 @@ def _classify_error(exc: Exception) -> str:
     return "error"
 
 
-def _safe_error(exc: Exception) -> str:
-    return str(exc)[:2000]
+def _safe_error(exc: Exception, settings: AuditSettings) -> str:
+    text = str(exc)
+    for secret in (settings.app_id, settings.app_secret):
+        if secret:
+            text = text.replace(secret, "***redacted***")
+    return text[:2000]
 
 
 def _sdk_version() -> str | None:
@@ -284,7 +293,8 @@ def _sdk_version() -> str | None:
 def _write_report(run_dir: Path, report: AuditReport) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "audit-report.json").write_text(
-        json.dumps(report.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(report.as_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     (run_dir / "audit-report.md").write_text(_render_markdown(report), encoding="utf-8")
 
@@ -309,26 +319,30 @@ def _render_markdown(report: AuditReport) -> str:
         lines.append(f"- `{status}`：{count}")
     if report.warnings:
         lines.extend(["", "## 警告", ""] + [f"- {item}" for item in report.warnings])
-    lines.extend([
-        "",
-        "## 接口结果",
-        "",
-        "| 类别 | 接口 | 状态 | 样本数 | 字段数 | 说明 |",
-        "|---|---|---:|---:|---:|---|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 接口结果",
+            "",
+            "| 类别 | 接口 | 状态 | 样本数 | 字段数 | 说明 |",
+            "|---|---|---:|---:|---:|---|",
+        ]
+    )
     for result in report.results:
         message = (result.message or "").replace("|", "\\|").replace("\n", " ")
         lines.append(
             f"| {result.category} | {result.label} (`{result.method_path}`) | {result.status} | "
             f"{result.sample_count if result.sample_count is not None else ''} | {len(result.fields)} | {message} |"
         )
-    lines.extend([
-        "",
-        "## 已发现的上下文",
-        "",
-        f"```json\n{json.dumps(report.context, ensure_ascii=False, indent=2)}\n```",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 已发现的上下文",
+            "",
+            f"```json\n{json.dumps(report.context, ensure_ascii=False, indent=2)}\n```",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
