@@ -86,7 +86,7 @@ def test_client_creation_failure_still_writes_redacted_report(tmp_path: Path) ->
         raise RuntimeError(f"credentials={kwargs['app_id']}:{kwargs['app_secret']}")
 
     report = asyncio.run(AuditRunner(settings, api_factory=broken_factory, probes=()).run())
-    assert report.summary == {"error": 1}
+    assert report.summary == {"authentication_failed": 1}
     report_text = (tmp_path / report.run_id / "audit-report.json").read_text(encoding="utf-8")
     assert settings.app_id not in report_text
     assert settings.app_secret not in report_text
