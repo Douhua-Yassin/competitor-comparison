@@ -1,1 +1,2 @@
+python-dotenv>=1,<2
 lingxingapi-httpx==0.1.5

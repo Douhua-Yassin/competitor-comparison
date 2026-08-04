@@ -16,9 +16,23 @@
 
 ## 运行环境
 
-领星接口盘点使用独立的可选 SDK，要求当前项目虚拟环境为 Python 3.10 或更高版本。原有竞品监控依赖仍保存在 `requirements.txt`，领星 SDK 单独保存在 `requirements-lingxing.txt`，因此领星依赖安装失败不会改变原有程序的依赖定义。
+现有竞品监控继续使用项目原来的 `.venv`，不会被领星模块修改。
 
-第一次运行 `领星接口盘点.bat` 时，脚本会检查 Python 版本并按需安装领星 SDK。已安装后不会重复安装。
+领星接口盘点单独使用：
+
+```text
+.venv-lingxing
+```
+
+该环境固定为 Python 3.11。第一次运行 `领星接口盘点.bat` 时，脚本会自动查找本机 Python 3.11、创建 `.venv-lingxing` 并安装 `requirements-lingxing.txt`。
+
+若尚未安装 Python 3.11，先在 PowerShell 执行：
+
+```powershell
+winget install -e --id Python.Python.3.11
+```
+
+安装完成后关闭并重新打开 PowerShell，再运行盘点脚本。不要删除或重建原来的 `.venv`。
 
 ## 配置
 
@@ -42,13 +56,7 @@ LINGXING_AUDIT_TIMEOUT_SECONDS=60
 
 ## 运行
 
-首次更新后先运行：
-
-```text
-首次安装.bat
-```
-
-然后双击：
+直接双击：
 
 ```text
 领星接口盘点.bat
@@ -57,8 +65,10 @@ LINGXING_AUDIT_TIMEOUT_SECONDS=60
 也可以在 PowerShell 中运行：
 
 ```powershell
-.\.venv\Scripts\python.exe -m app.lingxing_audit.cli
+.\.venv-lingxing\Scripts\python.exe -m app.lingxing_audit.cli
 ```
+
+首次运行需要创建环境并安装依赖，耗时会比后续运行长。
 
 ## 输出
 

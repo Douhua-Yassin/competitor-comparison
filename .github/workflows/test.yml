@@ -52,11 +52,23 @@ jobs:
           cmd.exe /d /c "首次安装.bat"
           if ($LASTEXITCODE -ne 0) { throw "首次安装.bat 失败：$LASTEXITCODE" }
           $py = '.\.venv\Scripts\python.exe'
-          & $py -m pip install --disable-pip-version-check --no-cache-dir -r requirements-lingxing.txt
-          if ($LASTEXITCODE -ne 0) { throw '领星可选依赖安装失败' }
           & $py -m pip install ruff
           & $py -m pip check
-          & $py -c "import sys, importlib.metadata as m; print(sys.version); print('Playwright=' + m.version('playwright')); print('Lingxing=' + m.version('lingxingapi-httpx'))"
+          & $py -c "import sys, importlib.metadata as m; print(sys.version); print('Playwright=' + m.version('playwright'))"
+
+      - name: Dedicated Lingxing Python 3.11 environment smoke test
+        if: matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $env:CI = '1'
+          $env:LINGXING_PYTHON = (Get-Command python.exe).Source
+          $env:LINGXING_AUDIT_SETUP_ONLY = '1'
+          cmd.exe /d /c "领星接口盘点.bat"
+          if ($LASTEXITCODE -ne 0) { throw "领星接口盘点.bat 独立环境初始化失败：$LASTEXITCODE" }
+          $lingxingPython = '.\.venv-lingxing\Scripts\python.exe'
+          if (-not (Test-Path $lingxingPython)) { throw '未创建 .venv-lingxing' }
+          & $lingxingPython -c "import sys; assert sys.version_info[:2] == (3, 11); import dotenv, lingxingapi_httpx; import importlib.metadata as m; assert m.version('lingxingapi-httpx') == '0.1.5'; print(sys.version); print('Lingxing=' + m.version('lingxingapi-httpx'))"
+          if ($LASTEXITCODE -ne 0) { throw '领星独立环境版本或依赖检查失败' }
 
       - name: Python compile check
         shell: pwsh
@@ -105,9 +117,15 @@ jobs:
           if ($lingxingRequirements -notmatch 'lingxingapi-httpx==0\.1\.5') {
             throw '领星 SDK 版本未锁定'
           }
+          if ($lingxingRequirements -notmatch 'python-dotenv>=1,<2') {
+            throw '领星独立环境缺少 python-dotenv'
+          }
           $gitignore = Get-Content -Raw -Encoding UTF8 '.gitignore'
           if ($gitignore -notmatch '(?m)^\.env\r?$') {
             throw '.env 未加入 Git 忽略规则'
+          }
+          if ($gitignore -notmatch '(?m)^\.venv-lingxing/\r?$') {
+            throw '.venv-lingxing 未加入 Git 忽略规则'
           }
 
       - name: Create test workbook
