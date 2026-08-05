@@ -175,7 +175,10 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def upsert_stores(stores: Iterable[dict[str, Any]], db_path: Optional[Path] = None) -> int:
+def upsert_stores(
+    stores: Iterable[dict[str, Any]],
+    db_path: Optional[Path] = None,
+) -> int:
     path = Path(db_path or DB_PATH)
     init_dashboard_db(path)
     now = utc_now()
@@ -193,7 +196,9 @@ def upsert_stores(stores: Iterable[dict[str, Any]], db_path: Optional[Path] = No
                     or store.get("account_name")
                 ) or f"店铺 {sid}"
                 country = _text(store.get("country") or store.get("marketplace_name"))
-                marketplace = _text(store.get("marketplace") or store.get("marketplace_id"))
+                marketplace = _text(
+                    store.get("marketplace") or store.get("marketplace_id")
+                )
                 db.execute(
                     """
                     INSERT INTO lx_stores (
@@ -214,7 +219,12 @@ def upsert_stores(stores: Iterable[dict[str, Any]], db_path: Optional[Path] = No
     return count
 
 
-def upsert_listings(listings: Iterable[dict[str, Any]], db_path: Optional[Path] = None) -> int:
+def upsert_listings(
+    listings: Iterable[dict[str, Any]],
+    db_path: Optional[Path] = None,
+    *,
+    fetched_sids: Optional[Iterable[int]] = None,
+) -> int:
     path = Path(db_path or DB_PATH)
     init_dashboard_db(path)
     now = utc_now()
@@ -228,8 +238,7 @@ def upsert_listings(listings: Iterable[dict[str, Any]], db_path: Optional[Path] 
                 msku = _text(item.get("msku") or item.get("seller_sku"))
                 if sid is None or not msku:
                     continue
-                key = (sid, msku)
-                seen.add(key)
+                seen.add((sid, msku))
                 country = _text(item.get("country") or item.get("marketplace"))
                 if country:
                     db.execute(
@@ -275,7 +284,9 @@ def upsert_listings(listings: Iterable[dict[str, Any]], db_path: Optional[Path] 
                         _text(item.get("product_name") or item.get("local_name")),
                         _text(item.get("brand") or item.get("brand_name")),
                         _text(item.get("title") or item.get("item_name")),
-                        _text(item.get("thumbnail_url") or item.get("small_image_url")),
+                        _text(
+                            item.get("thumbnail_url") or item.get("small_image_url")
+                        ),
                         country,
                         _text(item.get("currency_code")),
                         _text(item.get("fulfillment_channel")),
@@ -294,16 +305,26 @@ def upsert_listings(listings: Iterable[dict[str, Any]], db_path: Optional[Path] 
                 if row and row["responsibility_level"] != "not_mine":
                     _upsert_snapshot(db, int(row["id"]), today, item, now)
                 count += 1
-            if seen:
-                placeholders = ",".join("(?,?)" for _ in seen)
-                params: list[Any] = []
-                for sid, msku in sorted(seen):
-                    params.extend([sid, msku])
-                db.execute(
-                    f"UPDATE lx_listings SET active=0, updated_at=? "
-                    f"WHERE (sid, msku) NOT IN ({placeholders})",
-                    [now] + params,
-                )
+
+            target_sids = {
+                int(value)
+                for value in (fetched_sids or {sid for sid, _ in seen})
+                if _int(value) is not None
+            }
+            for sid in target_sids:
+                seen_mskus = sorted(msku for row_sid, msku in seen if row_sid == sid)
+                if seen_mskus:
+                    placeholders = ",".join("?" for _ in seen_mskus)
+                    db.execute(
+                        f"UPDATE lx_listings SET active=0, updated_at=? "
+                        f"WHERE sid=? AND msku NOT IN ({placeholders})",
+                        [now, sid] + seen_mskus,
+                    )
+                else:
+                    db.execute(
+                        "UPDATE lx_listings SET active=0, updated_at=? WHERE sid=?",
+                        (now, sid),
+                    )
     return count
 
 
@@ -315,11 +336,24 @@ def _upsert_snapshot(
     now: str,
 ) -> None:
     fields = (
-        "standard_price", "sale_price", "landed_price", "sales_amt_1d",
-        "sales_amt_7d", "sales_amt_14d", "sales_amt_30d", "sales_qty_1d",
-        "sales_qty_7d", "sales_qty_14d", "sales_qty_30d", "afn_fulfillable",
-        "afn_unsellable", "afn_inbound_working", "afn_inbound_shipped",
-        "afn_inbound_receiving", "review_count", "review_stars",
+        "standard_price",
+        "sale_price",
+        "landed_price",
+        "sales_amt_1d",
+        "sales_amt_7d",
+        "sales_amt_14d",
+        "sales_amt_30d",
+        "sales_qty_1d",
+        "sales_qty_7d",
+        "sales_qty_14d",
+        "sales_qty_30d",
+        "afn_fulfillable",
+        "afn_unsellable",
+        "afn_inbound_working",
+        "afn_inbound_shipped",
+        "afn_inbound_receiving",
+        "review_count",
+        "review_stars",
     )
     values = [_number(item.get(name)) for name in fields]
     db.execute(
@@ -369,21 +403,27 @@ def update_listing_scope(
     path = Path(db_path or DB_PATH)
     init_dashboard_db(path)
     line = _text(product_line)
+    if responsibility_level != "not_mine" and not line:
+        raise ValueError("标记重点或普通产品前，请先填写产品线")
+    if responsibility_level == "not_mine":
+        line = None
     now = utc_now()
     with WRITE_LOCK:
         with connection(path) as db:
-            row = db.execute("SELECT * FROM lx_listings WHERE id=?", (listing_id,)).fetchone()
+            row = db.execute(
+                "SELECT id FROM lx_listings WHERE id=? AND active=1",
+                (listing_id,),
+            ).fetchone()
             if row is None:
-                raise ValueError("产品不存在")
-            if responsibility_level != "not_mine" and not line:
-                line = _text(row["product_name"]) or _text(row["title"]) or row["asin"] or row["msku"]
-            if responsibility_level == "not_mine":
-                line = None
+                raise ValueError("产品不存在或已停用")
             db.execute(
                 "UPDATE lx_listings SET responsibility_level=?, product_line=?, updated_at=? WHERE id=?",
                 (responsibility_level, line, now, listing_id),
             )
-            updated = db.execute("SELECT * FROM lx_listings WHERE id=?", (listing_id,)).fetchone()
+            updated = db.execute(
+                "SELECT * FROM lx_listings WHERE id=?",
+                (listing_id,),
+            ).fetchone()
     return dict(updated)
 
 
@@ -395,7 +435,8 @@ def list_settings_products(db_path: Optional[Path] = None) -> dict[str, Any]:
             dict(row)
             for row in db.execute(
                 """
-                SELECT l.*, s.store_name, COALESCE(l.country, s.country, '未知国家') AS display_country
+                SELECT l.*, s.store_name,
+                       COALESCE(l.country, s.country, '未知国家') AS display_country
                 FROM lx_listings l
                 JOIN lx_stores s ON s.sid=l.sid
                 WHERE l.active=1 AND l.deleted=0
@@ -405,14 +446,21 @@ def list_settings_products(db_path: Optional[Path] = None) -> dict[str, Any]:
         ]
     countries = sorted({row["display_country"] for row in rows})
     stores = sorted(
-        ({"sid": row["sid"], "store_name": row["store_name"], "country": row["display_country"]} for row in rows),
+        (
+            {
+                "sid": row["sid"],
+                "store_name": row["store_name"],
+                "country": row["display_country"],
+            }
+            for row in rows
+        ),
         key=lambda item: (item["country"], item["store_name"], item["sid"]),
     )
     unique_stores: list[dict[str, Any]] = []
-    seen: set[int] = set()
+    seen_store_ids: set[int] = set()
     for store in stores:
-        if store["sid"] not in seen:
-            seen.add(store["sid"])
+        if store["sid"] not in seen_store_ids:
+            seen_store_ids.add(store["sid"])
             unique_stores.append(store)
     return {"countries": countries, "stores": unique_stores, "products": rows}
 
@@ -429,6 +477,7 @@ def selected_listing_rows(db_path: Optional[Path] = None) -> list[dict[str, Any]
                 FROM lx_listings l JOIN lx_stores s ON s.sid=l.sid
                 WHERE l.active=1 AND l.deleted=0
                   AND l.responsibility_level IN ('normal','key')
+                  AND l.product_line IS NOT NULL AND TRIM(l.product_line)<>''
                 ORDER BY l.sid, l.product_line, l.msku
                 """
             )
@@ -446,6 +495,7 @@ def upsert_daily_metric(
     db_path: Optional[Path] = None,
 ) -> None:
     path = Path(db_path or DB_PATH)
+    init_dashboard_db(path)
     now = utc_now()
     with WRITE_LOCK:
         with connection(path) as db:
@@ -478,16 +528,25 @@ def upsert_daily_metric(
 
 def finalize_before(cutoff_date: str, db_path: Optional[Path] = None) -> int:
     path = Path(db_path or DB_PATH)
+    init_dashboard_db(path)
     with WRITE_LOCK:
         with connection(path) as db:
             cursor = db.execute(
-                "UPDATE lx_daily_metrics SET is_final=1, updated_at=? WHERE metric_date<? AND is_final=0",
+                """
+                UPDATE lx_daily_metrics
+                SET is_final=1, updated_at=?
+                WHERE metric_date<? AND is_final=0
+                """,
                 (utc_now(), cutoff_date),
             )
             return int(cursor.rowcount)
 
 
-def create_sync_run(window_start: str, window_end: str, db_path: Optional[Path] = None) -> int:
+def create_sync_run(
+    window_start: str,
+    window_end: str,
+    db_path: Optional[Path] = None,
+) -> int:
     path = Path(db_path or DB_PATH)
     init_dashboard_db(path)
     with WRITE_LOCK:
@@ -513,6 +572,7 @@ def finish_sync_run(
     db_path: Optional[Path] = None,
 ) -> None:
     path = Path(db_path or DB_PATH)
+    init_dashboard_db(path)
     with WRITE_LOCK:
         with connection(path) as db:
             db.execute(
@@ -539,7 +599,9 @@ def last_sync(db_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
     path = Path(db_path or DB_PATH)
     init_dashboard_db(path)
     with connection(path) as db:
-        row = db.execute("SELECT * FROM lx_sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        row = db.execute(
+            "SELECT * FROM lx_sync_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
     if row is None:
         return None
     result = dict(row)
@@ -565,14 +627,18 @@ def save_note(
     with WRITE_LOCK:
         with connection(path) as db:
             row = db.execute(
-                "SELECT * FROM report_notes WHERE product_line=? AND window_code=? AND period_key=?",
+                """
+                SELECT * FROM report_notes
+                WHERE product_line=? AND window_code=? AND period_key=?
+                """,
                 (line, window_code, period_key),
             ).fetchone()
             if row is None:
                 cursor = db.execute(
                     """
                     INSERT INTO report_notes (
-                      product_line, window_code, period_key, content, created_at, updated_at
+                      product_line, window_code, period_key,
+                      content, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (line, window_code, period_key, content, now, now),
@@ -582,28 +648,43 @@ def save_note(
                 note_id = int(row["id"])
                 if row["content"] != content:
                     db.execute(
-                        "INSERT INTO report_note_revisions (note_id, content, saved_at) VALUES (?, ?, ?)",
+                        """
+                        INSERT INTO report_note_revisions (note_id, content, saved_at)
+                        VALUES (?, ?, ?)
+                        """,
                         (note_id, row["content"], now),
                     )
                 db.execute(
                     "UPDATE report_notes SET content=?, updated_at=? WHERE id=?",
                     (content, now, note_id),
                 )
-            saved = db.execute("SELECT * FROM report_notes WHERE id=?", (note_id,)).fetchone()
+            saved = db.execute(
+                "SELECT * FROM report_notes WHERE id=?",
+                (note_id,),
+            ).fetchone()
     return dict(saved)
 
 
-def load_notes(product_line: str, period_keys: dict[str, str], db_path: Optional[Path] = None) -> dict[str, Any]:
+def load_notes(
+    product_line: str,
+    period_keys: dict[str, str],
+    db_path: Optional[Path] = None,
+) -> dict[str, Any]:
     path = Path(db_path or DB_PATH)
     init_dashboard_db(path)
     result: dict[str, Any] = {}
     with connection(path) as db:
         for code, key in period_keys.items():
             row = db.execute(
-                "SELECT content, updated_at FROM report_notes WHERE product_line=? AND window_code=? AND period_key=?",
+                """
+                SELECT content, updated_at FROM report_notes
+                WHERE product_line=? AND window_code=? AND period_key=?
+                """,
                 (product_line, code, key),
             ).fetchone()
-            result[code] = dict(row) if row else {"content": "", "updated_at": None}
+            result[code] = (
+                dict(row) if row else {"content": "", "updated_at": None}
+            )
     return result
 
 
