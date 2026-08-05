@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -8,7 +10,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from .dashboard_db import list_settings_products, save_note, update_listing_scope
+from app.lingxing_audit.config import AuditSettings
+
+from .dashboard_db import DB_PATH, connection, list_settings_products, save_note, update_listing_scope
 from .dashboard_models import ListingScopeUpdate, NoteSave
 from .dashboard_service import dashboard
 from .lingxing_sync import run_recent_sync, sync_status
@@ -37,6 +41,55 @@ def api_dashboard():
 @router.get("/api/reporting/products")
 def api_products():
     return list_settings_products()
+
+
+@router.get("/api/reporting/diagnostics")
+def api_diagnostics():
+    database_ok = False
+    database_error = None
+    try:
+        with connection() as db:
+            db.execute("SELECT 1").fetchone()
+        database_ok = True
+    except Exception as exc:  # pragma: no cover - operating-system dependent
+        database_error = f"{type(exc).__name__}: {exc}"
+
+    lingxing_configured = False
+    lingxing_config_error = None
+    try:
+        settings = AuditSettings.load()
+        lingxing_configured = bool(settings.app_id and settings.app_secret and settings.base_url)
+    except Exception as exc:
+        lingxing_config_error = type(exc).__name__
+
+    proxy_names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    active_proxy_variables = sorted(name for name in proxy_names if os.environ.get(name))
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    no_proxy_items = {item.strip().lower() for item in no_proxy.split(",") if item.strip()}
+
+    return {
+        "service": "reporting",
+        "status": "ready",
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "database": {
+            "path": str(DB_PATH),
+            "exists": DB_PATH.exists(),
+            "readable": database_ok,
+            "error": database_error,
+        },
+        "lingxing": {
+            "configured": lingxing_configured,
+            "config_error": lingxing_config_error,
+        },
+        "proxy": {
+            "active_environment_variables": active_proxy_variables,
+            "loopback_bypassed": "127.0.0.1" in no_proxy_items and "localhost" in no_proxy_items,
+        },
+        "browser": {
+            "launch_mode": "isolated-direct",
+            "extensions_disabled": True,
+        },
+    }
 
 
 @router.put("/api/reporting/products/scope")
