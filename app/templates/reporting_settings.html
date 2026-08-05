@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>产品设置</title>
+  <link rel="stylesheet" href="/static/reporting-dashboard.css">
+</head>
+<body>
+  <header class="topbar compact">
+    <div>
+      <p class="eyebrow">PRODUCT SETTINGS</p>
+      <h1>产品设置</h1>
+      <p class="subtitle">产品目录来自领星。只有标记为重点或普通的产品才会同步经营数据。</p>
+    </div>
+    <div class="top-actions">
+      <button id="syncButton" type="button">同步最新数据</button>
+      <a class="settings-button" href="/reporting">返回主页面</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="filter-bar">
+      <label>国家<select id="countryFilter"><option value="">全部国家</option></select></label>
+      <label>店铺<select id="storeFilter"><option value="">全部店铺</option></select></label>
+      <label class="search-label">产品搜索<input id="productSearch" type="search" placeholder="名称、ASIN、MSKU、LSKU"></label>
+      <span id="settingsStatus">正在加载领星 Listing……</span>
+    </section>
+    <section id="settingsProducts" class="settings-groups">
+      <div class="empty-state">正在加载产品目录……</div>
+    </section>
+  </main>
+
+  <dialog id="messageDialog">
+    <form method="dialog">
+      <h3 id="dialogTitle">提示</h3>
+      <p id="dialogBody"></p>
+      <button>关闭</button>
+    </form>
+  </dialog>
+
+  <script src="/static/reporting-settings.js"></script>
+</body>
+</html>
