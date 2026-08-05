@@ -1,7 +1,8 @@
 ﻿. "$PSScriptRoot\common.ps1"
 Set-Location $script:ProjectRoot
 
-$python = Join-Path $script:ProjectRoot '.venv\Scripts\python.exe'
+$python = Join-Path $script:ProjectRoot '.venv-lingxing\Scripts\python.exe'
+$requirements = Join-Path $script:ProjectRoot 'requirements-lingxing.txt'
 $pidFile = Join-Path $script:ProjectRoot 'data\reporting-server.pid'
 $stdoutLog = Join-Path $script:ProjectRoot 'data\reporting-server.log'
 $stderrLog = Join-Path $script:ProjectRoot 'data\reporting-server-error.log'
@@ -16,14 +17,33 @@ function Test-IsReportingProcess($Process) {
 }
 
 if (-not (Test-Path -LiteralPath $python)) {
-    Show-AppMessage -Title '经营报告数据管理' -Message '尚未完成首次安装，请先运行“首次安装.bat”。' -Icon Warning
+    Show-AppMessage -Title '经营报告' -Message '尚未创建领星专用环境。请先运行“领星接口盘点.bat”，程序不会修改原竞品环境。' -Icon Warning
     exit 1
+}
+
+$dependencyCode = 1
+$previousPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'SilentlyContinue'
+    & $python -c "import fastapi, uvicorn, jinja2, httpx, docx, dotenv, lingxingapi_httpx" 2>$null
+    $dependencyCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousPreference
+}
+if ($dependencyCode -ne 0) {
+    Write-Host '正在安装报告程序依赖……'
+    & $python -m pip install --disable-pip-version-check --no-cache-dir -r $requirements
+    if ($LASTEXITCODE -ne 0) {
+        Show-AppMessage -Title '经营报告' -Message '报告程序依赖安装失败，请查看当前窗口中的错误。' -Icon Error
+        exit 1
+    }
 }
 
 $listenerProcess = Get-ListeningProcess -Port 8790
 if ($listenerProcess) {
     if (-not (Test-IsReportingProcess -Process $listenerProcess)) {
-        Show-AppMessage -Title '经营报告数据管理' -Message "8790 端口已被其他程序占用。`n`n$($listenerProcess.CommandLine)" -Icon Error
+        Show-AppMessage -Title '经营报告' -Message "8790 端口已被其他程序占用。`n`n$($listenerProcess.CommandLine)" -Icon Error
         exit 1
     }
     if (Test-LocalUrl -Url $statusUrl) {
@@ -49,17 +69,18 @@ try {
     [System.IO.File]::WriteAllText($pidFile, [string]$process.Id, [System.Text.Encoding]::ASCII)
 }
 catch {
-    Show-AppMessage -Title '经营报告数据管理' -Message ("报告服务启动失败：" + $_.Exception.Message) -Icon Error
+    Show-AppMessage -Title '经营报告' -Message ("报告服务启动失败：" + $_.Exception.Message) -Icon Error
     exit 1
 }
 
-for ($i = 1; $i -le 45; $i++) {
+for ($i = 1; $i -le 60; $i++) {
     if (Test-LocalUrl -Url $statusUrl) {
         if (-not $env:CI) { Start-Process 'http://127.0.0.1:8790/reporting' }
         exit 0
     }
     if ($process.HasExited) { break }
     if ($i -eq 10) { Write-Host '报告服务仍在初始化，请稍候...' }
+    if ($i -eq 30) { Write-Host '首次启动可能正在初始化数据库和文档组件...' }
     Start-Sleep -Seconds 1
 }
 
@@ -69,9 +90,9 @@ if (-not $process.HasExited) {
 Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 $tail = ''
 if (Test-Path -LiteralPath $stderrLog) {
-    $tail = (Get-Content -LiteralPath $stderrLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+    $tail = (Get-Content -LiteralPath $stderrLog -Tail 30 -ErrorAction SilentlyContinue) -join "`n"
 }
-$message = '报告服务在 45 秒内没有准备完成。'
+$message = '报告服务在 60 秒内没有准备完成。'
 if ($tail) { $message += "`n`n最近错误：`n$tail" }
-Show-AppMessage -Title '经营报告数据管理' -Message $message -Icon Error
+Show-AppMessage -Title '经营报告' -Message $message -Icon Error
 exit 1
