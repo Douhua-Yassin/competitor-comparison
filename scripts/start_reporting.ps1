@@ -7,6 +7,33 @@ $pidFile = Join-Path $script:ProjectRoot 'data\reporting-server.pid'
 $stdoutLog = Join-Path $script:ProjectRoot 'data\reporting-server.log'
 $stderrLog = Join-Path $script:ProjectRoot 'data\reporting-server-error.log'
 $statusUrl = 'http://127.0.0.1:8790/api/status'
+$reportUrl = 'http://127.0.0.1:8790/reporting'
+$openScript = Join-Path $PSScriptRoot 'open_reporting.ps1'
+
+function Add-LoopbackNoProxy {
+    $required = @('127.0.0.1', 'localhost')
+    foreach ($name in @('NO_PROXY', 'no_proxy')) {
+        $current = [Environment]::GetEnvironmentVariable($name, 'Process')
+        $parts = @()
+        if ($current) {
+            $parts = @($current.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        }
+        foreach ($item in $required) {
+            if ($parts -notcontains $item) { $parts += $item }
+        }
+        [Environment]::SetEnvironmentVariable($name, ($parts -join ','), 'Process')
+    }
+}
+
+function Open-ReportingPage {
+    if ($env:CI) { return }
+    if (Test-Path -LiteralPath $openScript) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $openScript -Url $reportUrl
+    }
+    else {
+        Start-Process $reportUrl
+    }
+}
 
 function Test-IsReportingProcess($Process) {
     if (-not $Process -or -not $Process.CommandLine) { return $false }
@@ -15,6 +42,8 @@ function Test-IsReportingProcess($Process) {
         $Process.CommandLine -match '(?i)--port\s+8790(?:\s|$)'
     )
 }
+
+Add-LoopbackNoProxy
 
 if (-not (Test-Path -LiteralPath $python)) {
     Show-AppMessage -Title '经营报告' -Message '尚未创建领星专用环境。请先运行“领星接口盘点.bat”，程序不会修改原竞品环境。' -Icon Warning
@@ -47,7 +76,7 @@ if ($listenerProcess) {
         exit 1
     }
     if (Test-LocalUrl -Url $statusUrl) {
-        if (-not $env:CI) { Start-Process 'http://127.0.0.1:8790/reporting' }
+        Open-ReportingPage
         exit 0
     }
     Stop-Process -Id $listenerProcess.ProcessId -Force -ErrorAction SilentlyContinue
@@ -75,7 +104,7 @@ catch {
 
 for ($i = 1; $i -le 60; $i++) {
     if (Test-LocalUrl -Url $statusUrl) {
-        if (-not $env:CI) { Start-Process 'http://127.0.0.1:8790/reporting' }
+        Open-ReportingPage
         exit 0
     }
     if ($process.HasExited) { break }
