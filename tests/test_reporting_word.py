@@ -3,15 +3,17 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from docx import Document
+import pytest
+
+Document = pytest.importorskip("docx").Document
 
 from app.reporting.dashboard_db import (
+    list_settings_products,
     save_note,
     update_listing_scope,
     upsert_daily_metric,
     upsert_listings,
     upsert_stores,
-    list_settings_products,
 )
 from app.reporting.report_generator import generate_report
 
@@ -62,7 +64,6 @@ def test_rule_based_word_report_is_valid(tmp_path: Path, monkeypatch):
 
     from app.reporting import report_generator
 
-    monkeypatch.setattr(report_generator, "DB_PATH", db_path, raising=False)
     original_dashboard = report_generator.dashboard
 
     def dashboard_for_test(*args, **kwargs):
