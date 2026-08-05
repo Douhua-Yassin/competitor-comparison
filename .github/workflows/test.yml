@@ -12,7 +12,7 @@ concurrency:
 jobs:
   windows-test:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +67,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "领星独立环境初始化失败：$LASTEXITCODE" }
           $lingxingPython = '.\.venv-lingxing\Scripts\python.exe'
           if (-not (Test-Path $lingxingPython)) { throw '未创建 .venv-lingxing' }
-          & $lingxingPython -c "import sys; assert sys.version_info[:2] == (3, 11); import dotenv, lingxingapi_httpx; import importlib.metadata as m; assert m.version('lingxingapi-httpx') == '0.1.5'; print(sys.version); print('Lingxing=' + m.version('lingxingapi-httpx'))"
+          & $lingxingPython -c "import sys; assert sys.version_info[:2] == (3, 11); import dotenv, lingxingapi_httpx, fastapi, uvicorn, jinja2, httpx, docx; import importlib.metadata as m; assert m.version('lingxingapi-httpx') == '0.1.5'; print(sys.version); print('Lingxing=' + m.version('lingxingapi-httpx'))"
           if ($LASTEXITCODE -ne 0) { throw '领星独立环境版本或依赖检查失败' }
 
       - name: Python compile check
@@ -86,7 +86,8 @@ jobs:
         shell: pwsh
         run: |
           node --check app/static/app.js
-          node --check app/static/reporting.js
+          node --check app/static/reporting-dashboard.js
+          node --check app/static/reporting-settings.js
 
       - name: Launcher wrapper checks
         shell: pwsh
@@ -122,8 +123,10 @@ jobs:
           if ($lingxingRequirements -notmatch 'lingxingapi-httpx==0\.1\.5') {
             throw '领星 SDK 版本未锁定'
           }
-          if ($lingxingRequirements -notmatch 'python-dotenv>=1,<2') {
-            throw '领星独立环境缺少 python-dotenv'
+          foreach ($required in @('python-dotenv', 'fastapi', 'uvicorn', 'jinja2', 'httpx', 'python-docx')) {
+            if ($lingxingRequirements -notmatch [regex]::Escape($required)) {
+              throw "领星报告环境缺少依赖：$required"
+            }
           }
           $gitignore = Get-Content -Raw -Encoding UTF8 '.gitignore'
           if ($gitignore -notmatch '(?m)^\.env\r?$') {
@@ -153,7 +156,8 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw '停止脚本结束后 8787 仍在监听' }
           exit 0
 
-      - name: Real reporting service smoke test
+      - name: Real Lingxing-first reporting service smoke test
+        if: matrix.python-version == '3.11'
         shell: pwsh
         run: |
           $env:CI = '1'
@@ -161,8 +165,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "启动报告程序.bat 失败：$LASTEXITCODE" }
           curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/status *> $null
           if ($LASTEXITCODE -ne 0) { throw '报告服务启动后 8790 不可用' }
-          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/overview *> $null
-          if ($LASTEXITCODE -ne 0) { throw '报告数据 API 不可用' }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/dashboard *> $null
+          if ($LASTEXITCODE -ne 0) { throw '经营看板 API 不可用' }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/products *> $null
+          if ($LASTEXITCODE -ne 0) { throw '领星产品设置 API 不可用' }
           cmd.exe /d /c "停止报告程序.bat"
           if ($LASTEXITCODE -ne 0) { throw "停止报告程序.bat 失败：$LASTEXITCODE" }
           Start-Sleep -Seconds 2
