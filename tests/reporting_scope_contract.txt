@@ -1,5 +1,0 @@
-Settings catalog: all active Lingxing Listings are available for assignment.
-Operational sync: only key and normal Listings are matched and persisted.
-Dashboard: only key product lines are rendered.
-History: current rolling 14 days may update; earlier metrics are finalized and immutable.
-Competitor data: excluded from this report workflow.

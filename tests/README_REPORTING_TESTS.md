@@ -1,1 +1,0 @@
-The reporting tests cover Lingxing-derived catalog settings, two-button responsibility states, selected-only metric persistence, rolling-window updates, finalized history immutability, key-only dashboard rendering, note loading, and DOCX validity.

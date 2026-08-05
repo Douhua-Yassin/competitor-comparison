@@ -1,1 +1,0 @@
-Final contract for this correction branch: direct Lingxing catalog; selected-only operating metrics; 14-day mutable window; older immutable history; key-only dashboard; autosaved notes; rule/DeepSeek Word output; no competitor integration; no web target entry.
