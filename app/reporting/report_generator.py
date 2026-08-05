@@ -14,11 +14,20 @@ from docx.shared import Cm, Pt
 
 from .dashboard_db import DATA_DIR
 from .dashboard_service import dashboard
+from .docx_style import configure_document_styles
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = DATA_DIR / "reports"
 REPORT_WINDOW = {"day": "day", "week": "7d", "month": "month"}
 REPORT_LABEL = {"day": "日报", "week": "周报", "month": "月报"}
+ANALYSIS_KEYS = (
+    "executive_summary",
+    "performance",
+    "causes",
+    "risks",
+    "actions",
+    "support_needed",
+)
 
 
 def generate_report(
@@ -39,16 +48,22 @@ def generate_report(
     if module is None:
         raise ValueError("当前重点产品线不存在")
     selected = next(
-        item for item in module["windows"] if item["code"] == REPORT_WINDOW[report_type]
+        item
+        for item in module["windows"]
+        if item["code"] == REPORT_WINDOW[report_type]
     )
     analysis = _deepseek_analysis(module, selected, report_type)
 
     target_dir = Path(output_dir or REPORT_DIR / current.isoformat())
     target_dir.mkdir(parents=True, exist_ok=True)
     safe_line = re.sub(r'[\\/:*?"<>|]+', "_", product_line).strip() or "产品线"
-    path = target_dir / f"{safe_line}-{current.isoformat()}-{REPORT_LABEL[report_type]}.docx"
+    path = (
+        target_dir
+        / f"{safe_line}-{current.isoformat()}-{REPORT_LABEL[report_type]}.docx"
+    )
 
     document = Document()
+    configure_document_styles(document)
     section = document.sections[0]
     section.top_margin = Cm(2)
     section.bottom_margin = Cm(2)
@@ -65,8 +80,7 @@ def generate_report(
     subtitle.add_run(f"报告周期：{selected['start']} 至 {selected['end']}")
 
     document.add_heading("一、领导摘要", level=1)
-    for item in analysis.get("executive_summary", []):
-        document.add_paragraph(str(item), style="List Bullet")
+    _add_bullets(document, analysis.get("executive_summary"))
 
     document.add_heading("二、核心数据", level=1)
     _add_summary_table(document, selected)
@@ -89,9 +103,9 @@ def generate_report(
             continue
         any_note = True
         document.add_heading(window["label"], level=2)
-        for paragraph_text in content.splitlines():
-            if paragraph_text.strip():
-                document.add_paragraph(paragraph_text.strip())
+        for text in content.splitlines():
+            if text.strip():
+                document.add_paragraph(text.strip())
     if not any_note:
         document.add_paragraph("本周期尚未填写人工记录。")
 
@@ -103,8 +117,7 @@ def generate_report(
     document.add_heading("六、产品范围", level=1)
     table = document.add_table(rows=1, cols=5)
     table.style = "Table Grid"
-    headers = ["产品", "ASIN", "MSKU", "店铺", "国家"]
-    for index, value in enumerate(headers):
+    for index, value in enumerate(["产品", "ASIN", "MSKU", "店铺", "国家"]):
         table.rows[0].cells[index].text = value
     for product in module["products"]:
         cells = table.add_row().cells
@@ -133,9 +146,8 @@ def _add_summary_table(document: Document, window: dict[str, Any]) -> None:
     ]
     table = document.add_table(rows=1, cols=3)
     table.style = "Table Grid"
-    table.rows[0].cells[0].text = "指标"
-    table.rows[0].cells[1].text = "本期"
-    table.rows[0].cells[2].text = "对比上个等长周期"
+    for index, value in enumerate(["指标", "本期", "对比上个等长周期"]):
+        table.rows[0].cells[index].text = value
     summary = window.get("summary") or {}
     comparisons = window.get("comparisons") or {}
     for label, code, unit in metrics:
@@ -145,14 +157,18 @@ def _add_summary_table(document: Document, window: dict[str, Any]) -> None:
         cells[2].text = _format_change(comparisons.get(code))
 
 
-def _add_analysis_section(document: Document, heading: str, value: Any) -> None:
-    document.add_heading(heading, level=2)
+def _add_bullets(document: Document, value: Any) -> None:
     items = value if isinstance(value, list) else ([value] if value else [])
     if not items:
         document.add_paragraph("暂无。")
         return
     for item in items:
         document.add_paragraph(str(item), style="List Bullet")
+
+
+def _add_analysis_section(document: Document, heading: str, value: Any) -> None:
+    document.add_heading(heading, level=2)
+    _add_bullets(document, value)
 
 
 def _deepseek_analysis(
@@ -172,18 +188,17 @@ def _deepseek_analysis(
         "products": module["products"],
     }
     prompt = (
-        "根据下面的确定数据和人工记录，生成经营报告分析。不得创造、修改或补齐任何数字；"
+        "根据下面的确定数据和人工记录生成经营报告分析。不得创造、修改或补齐任何数字；"
         "缺失数据必须明确写缺失。将人工记录中的已执行操作、判断、原因、计划融入分析。"
-        "只返回JSON，字段为 executive_summary、performance、causes、risks、actions、support_needed，"
-        "每个字段都是字符串数组。\n\n"
+        "只返回JSON，字段为 executive_summary、performance、causes、risks、actions、"
+        "support_needed，每个字段都是字符串数组。\n\n"
         + json.dumps(context, ensure_ascii=False, default=str)
     )
     try:
         import httpx
 
-        url = settings["base_url"].rstrip("/") + "/chat/completions"
         response = httpx.post(
-            url,
+            settings["base_url"].rstrip("/") + "/chat/completions",
             headers={"Authorization": f"Bearer {settings['api_key']}"},
             json={
                 "model": settings["model"],
@@ -204,14 +219,7 @@ def _deepseek_analysis(
         parsed = json.loads(content)
         return {
             key: [str(item) for item in parsed.get(key, []) if str(item).strip()]
-            for key in (
-                "executive_summary",
-                "performance",
-                "causes",
-                "risks",
-                "actions",
-                "support_needed",
-            )
+            for key in ANALYSIS_KEYS
         }
     except Exception:
         return _fallback_analysis(module, selected)
