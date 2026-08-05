@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any, Optional
+
+from .dashboard_db import DB_PATH, connection, init_dashboard_db, last_sync, load_notes
+
+WINDOWS: tuple[tuple[str, str, int | None], ...] = (
+    ("day", "当日", 1),
+    ("3d", "近3日", 3),
+    ("7d", "近7日", 7),
+    ("14d", "近半月（14日）", 14),
+    ("month", "本月", None),
+)
+SUM_CODES = {
+    "sales_amount", "units", "order_count", "refund_amount", "refund_count",
+    "impressions", "clicks", "ad_spend", "ad_sales", "ad_orders", "ad_units",
+}
+LATEST_CODES = {"fba_available", "fba_inbound", "fba_reserved"}
+RATIO_CODES = {"ctr", "cpc", "cvr", "acos", "roas"}
+
+
+def period_keys(today: Optional[date] = None) -> dict[str, str]:
+    current = today or date.today()
+    result: dict[str, str] = {}
+    for code, _, days in WINDOWS:
+        if code == "month":
+            result[code] = current.strftime("%Y-%m")
+        else:
+            start = current - timedelta(days=(days or 1) - 1)
+            result[code] = f"{start.isoformat()}:{current.isoformat()}"
+    return result
+
+
+def dashboard(db_path: Optional[Path] = None, today: Optional[date] = None) -> dict[str, Any]:
+    path = Path(db_path or DB_PATH)
+    init_dashboard_db(path)
+    current = today or date.today()
+    month_start = current.replace(day=1)
+    history_start = min(month_start, current - timedelta(days=27))
+    keys = period_keys(current)
+    with connection(path) as db:
+        rows = [
+            dict(row)
+            for row in db.execute(
+                """
+                SELECT l.*, s.store_name,
+                       COALESCE(l.country, s.country, '未知国家') AS display_country
+                FROM lx_listings l JOIN lx_stores s ON s.sid=l.sid
+                WHERE l.active=1 AND l.deleted=0
+                  AND l.responsibility_level='key'
+                  AND l.product_line IS NOT NULL AND TRIM(l.product_line)<>''
+                ORDER BY l.product_line, display_country, s.store_name, l.product_name, l.msku
+                """
+            )
+        ]
+        listing_ids = [int(row["id"]) for row in rows]
+        metrics: list[dict[str, Any]] = []
+        snapshots: list[dict[str, Any]] = []
+        if listing_ids:
+            placeholders = ",".join("?" for _ in listing_ids)
+            metrics = [
+                dict(row)
+                for row in db.execute(
+                    f"""
+                    SELECT metric_date, listing_id, metric_code, metric_value, unit,
+                           source_endpoint, is_final
+                    FROM lx_daily_metrics
+                    WHERE listing_id IN ({placeholders}) AND metric_date>=?
+                    ORDER BY metric_date, listing_id, metric_code
+                    """,
+                    listing_ids + [history_start.isoformat()],
+                )
+            ]
+            snapshots = [
+                dict(row)
+                for row in db.execute(
+                    f"""
+                    SELECT s.* FROM lx_listing_snapshots s
+                    JOIN (
+                      SELECT listing_id, MAX(snapshot_date) AS latest_date
+                      FROM lx_listing_snapshots
+                      WHERE listing_id IN ({placeholders})
+                      GROUP BY listing_id
+                    ) latest
+                      ON latest.listing_id=s.listing_id AND latest.latest_date=s.snapshot_date
+                    """,
+                    listing_ids,
+                )
+            ]
+
+    by_line: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_line[str(row["product_line"])].append(row)
+    metric_by_listing: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in metrics:
+        metric_by_listing[int(row["listing_id"])].append(row)
+    snapshot_by_listing = {int(row["listing_id"]): row for row in snapshots}
+
+    modules: list[dict[str, Any]] = []
+    for line, products in by_line.items():
+        line_metrics: list[dict[str, Any]] = []
+        for product in products:
+            line_metrics.extend(metric_by_listing[int(product["id"])])
+        notes = load_notes(line, keys, path)
+        windows = [
+            _window_payload(
+                code, label, days, current, line_metrics, products,
+                snapshot_by_listing, notes[code], keys[code]
+            )
+            for code, label, days in WINDOWS
+        ]
+        modules.append(
+            {
+                "product_line": line,
+                "product_count": len(products),
+                "products": [
+                    {
+                        "id": row["id"],
+                        "product_name": row["product_name"],
+                        "asin": row["asin"],
+                        "msku": row["msku"],
+                        "store_name": row["store_name"],
+                        "country": row["display_country"],
+                    }
+                    for row in products
+                ],
+                "windows": windows,
+            }
+        )
+    return {
+        "today": current.isoformat(),
+        "last_sync": last_sync(path),
+        "product_lines": modules,
+        "window_days": 14,
+    }
+
+
+def _window_payload(
+    code: str,
+    label: str,
+    days: Optional[int],
+    today: date,
+    metrics: list[dict[str, Any]],
+    products: list[dict[str, Any]],
+    snapshots: dict[int, dict[str, Any]],
+    note: dict[str, Any],
+    period_key: str,
+) -> dict[str, Any]:
+    start = today.replace(day=1) if code == "month" else today - timedelta(days=(days or 1) - 1)
+    prior_end = start - timedelta(days=1)
+    span = (today - start).days + 1
+    prior_start = prior_end - timedelta(days=span - 1)
+    current_rows = [row for row in metrics if start.isoformat() <= row["metric_date"] <= today.isoformat()]
+    prior_rows = [row for row in metrics if prior_start.isoformat() <= row["metric_date"] <= prior_end.isoformat()]
+    summary = _aggregate(current_rows)
+    prior = _aggregate(prior_rows)
+    source_note = None
+    if not summary.get("sales_amount") and code in {"day", "7d", "14d"}:
+        fallback = _listing_rollup(code, products, snapshots)
+        if fallback:
+            summary.update({key: value for key, value in fallback.items() if value is not None})
+            source_note = "销售数据来自领星 Listing 当前滚动口径；开始积累逐日数据后将切换为日数据。"
+    comparisons: dict[str, Optional[float]] = {}
+    for metric_code in ("sales_amount", "units", "ad_spend", "ad_sales", "refund_amount"):
+        comparisons[metric_code] = _change(summary.get(metric_code), prior.get(metric_code))
+    series = _series(current_rows, start, today)
+    warnings: list[str] = []
+    if not current_rows:
+        warnings.append("该周期尚无完整逐日经营数据")
+    if summary.get("sales_amount") is None:
+        warnings.append("销售额数据缺失")
+    if summary.get("ad_spend") is None:
+        warnings.append("广告数据缺失")
+    return {
+        "code": code,
+        "label": label,
+        "start": start.isoformat(),
+        "end": today.isoformat(),
+        "period_key": period_key,
+        "summary": summary,
+        "prior_summary": prior,
+        "comparisons": comparisons,
+        "series": series,
+        "note": note,
+        "warnings": warnings,
+        "source_note": source_note,
+    }
+
+
+def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Optional[float]]:
+    grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["metric_code"])].append((str(row["metric_date"]), float(row["metric_value"])))
+    result: dict[str, Optional[float]] = {}
+    for code in SUM_CODES:
+        values = grouped.get(code, [])
+        result[code] = sum(value for _, value in values) if values else None
+    for code in LATEST_CODES:
+        values = grouped.get(code, [])
+        result[code] = max(values, key=lambda item: item[0])[1] if values else None
+    for code in RATIO_CODES:
+        values = grouped.get(code, [])
+        result[code] = sum(value for _, value in values) / len(values) if values else None
+    sales = result.get("sales_amount")
+    spend = result.get("ad_spend")
+    result["tacos"] = spend / sales if sales not in (None, 0) and spend is not None else None
+    return result
+
+
+def _series(rows: list[dict[str, Any]], start: date, end: date) -> dict[str, Any]:
+    dates = [start + timedelta(days=index) for index in range((end - start).days + 1)]
+    codes = ("sales_amount", "units", "ad_spend", "fba_available")
+    values: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for row in rows:
+        values[(str(row["metric_date"]), str(row["metric_code"]))].append(float(row["metric_value"]))
+    result: dict[str, Any] = {"dates": [item.isoformat() for item in dates]}
+    for code in codes:
+        result[code] = [
+            sum(values[(item.isoformat(), code)]) if values[(item.isoformat(), code)] else None
+            for item in dates
+        ]
+    return result
+
+
+def _listing_rollup(
+    code: str,
+    products: list[dict[str, Any]],
+    snapshots: dict[int, dict[str, Any]],
+) -> dict[str, Optional[float]]:
+    suffix = {"day": "1d", "7d": "7d", "14d": "14d"}.get(code)
+    if suffix is None:
+        return {}
+    sales_values: list[float] = []
+    unit_values: list[float] = []
+    stock_values: list[float] = []
+    for product in products:
+        snapshot = snapshots.get(int(product["id"]))
+        if not snapshot:
+            continue
+        sales = snapshot.get(f"sales_amt_{suffix}")
+        units = snapshot.get(f"sales_qty_{suffix}")
+        stock = snapshot.get("afn_fulfillable")
+        if sales is not None:
+            sales_values.append(float(sales))
+        if units is not None:
+            unit_values.append(float(units))
+        if stock is not None:
+            stock_values.append(float(stock))
+    return {
+        "sales_amount": sum(sales_values) if sales_values else None,
+        "units": sum(unit_values) if unit_values else None,
+        "fba_available": sum(stock_values) if stock_values else None,
+    }
+
+
+def _change(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous in (None, 0):
+        return None
+    return (current - previous) / abs(previous)
