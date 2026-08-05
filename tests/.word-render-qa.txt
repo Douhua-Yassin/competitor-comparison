@@ -1,0 +1,1 @@
+Word fixture QA: generated DOCX was rendered to two PNG pages. Chinese font fallback was corrected by applying an explicit CJK font style. Final render showed no clipping, overlap, missing glyphs, or broken tables. This file records the manual fixture check; it contains no generated artifact.
