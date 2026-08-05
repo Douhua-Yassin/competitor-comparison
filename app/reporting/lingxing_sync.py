@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Iterable, Optional
@@ -20,6 +21,7 @@ from .dashboard_db import (
 )
 
 SYNC_DAYS = 14
+PAGE_SIZE = 100
 
 
 @dataclass
@@ -84,24 +86,28 @@ async def run_recent_sync(
             )
             async with api:
                 stores_payload = await api.basic.Sellers()
-                stores = extract_records(to_plain(stores_payload))
-                upsert_stores([row for row in stores if isinstance(row, dict)])
+                stores = [
+                    row
+                    for row in extract_records(to_plain(stores_payload))
+                    if isinstance(row, dict)
+                ]
+                upsert_stores(stores)
                 sids = [
                     value
                     for value in (
                         _as_int(row.get("sid") or row.get("seller_id") or row.get("id"))
                         for row in stores
-                        if isinstance(row, dict)
                     )
                     if value is not None
                 ]
                 if cfg.sid is not None:
                     sids = [cfg.sid]
+                sids = sorted(set(sids))
                 if not sids:
                     raise RuntimeError("领星没有返回可用店铺 SID")
 
-                listings = await _fetch_raw_listings(api, sorted(set(sids)))
-                catalog_count = upsert_listings(listings)
+                listings = await _fetch_raw_listings(api, sids)
+                catalog_count = upsert_listings(listings, fetched_sids=sids)
                 _SYNC_STATUS.update(
                     catalog_count=catalog_count,
                     message="Listing 已刷新，正在同步最近14天经营数据",
@@ -142,25 +148,23 @@ async def run_recent_sync(
                     )
                     profiles: list[dict[str, Any]] = []
                     try:
-                        profile_payload = await api.ads.AdProfiles()
-                        profiles = [
-                            row
-                            for row in extract_records(to_plain(profile_payload))
-                            if isinstance(row, dict)
-                        ]
+                        profiles = await _fetch_all_ad_profiles(api)
                     except Exception as exc:  # pragma: no cover - remote behavior
                         warnings.append("广告账号读取失败：" + _safe_error(exc))
-                    profile_ids = _selected_profile_ids(profiles, selected_sids)
-                    metric_count += await _sync_endpoint(
-                        api.ads.SpProductReports,
-                        "sp_product_report",
-                        selected_sids,
-                        window_start,
-                        today,
-                        index,
-                        warnings,
-                        profile_ids=profile_ids,
-                    )
+                    profile_pairs = _selected_profile_pairs(profiles, selected_sids)
+                    if profile_pairs:
+                        metric_count += await _sync_endpoint(
+                            api.ads.SpProductReports,
+                            "sp_product_report",
+                            selected_sids,
+                            window_start,
+                            today,
+                            index,
+                            warnings,
+                            profile_pairs=profile_pairs,
+                        )
+                    else:
+                        warnings.append("负责产品所在店铺没有可用的SP广告账号")
                 finalized_count = finalize_before(window_start.isoformat())
 
             status = "success" if not warnings else "partial_success"
@@ -232,9 +236,32 @@ async def _fetch_raw_listings(api: Any, sids: list[int]) -> list[dict[str, Any]]
         batch = extract_records(plain)
         rows.extend(row for row in batch if isinstance(row, dict))
         total = _as_int(plain.get("total_count")) if isinstance(plain, dict) else None
-        if not batch or len(batch) < length or (total is not None and len(rows) >= total):
+        if (
+            not batch
+            or len(batch) < length
+            or (total is not None and len(rows) >= total)
+        ):
             break
         offset += length
+    return rows
+
+
+async def _fetch_all_ad_profiles(api: Any) -> list[dict[str, Any]]:
+    offset = 0
+    rows: list[dict[str, Any]] = []
+    while True:
+        payload = await api.ads.AdProfiles(offset=offset, length=PAGE_SIZE)
+        plain = to_plain(payload)
+        batch = extract_records(plain)
+        rows.extend(row for row in batch if isinstance(row, dict))
+        total = _as_int(plain.get("total_count")) if isinstance(plain, dict) else None
+        if (
+            not batch
+            or len(batch) < PAGE_SIZE
+            or (total is not None and len(rows) >= total)
+        ):
+            break
+        offset += PAGE_SIZE
     return rows
 
 
@@ -246,7 +273,7 @@ async def _sync_endpoint(
     end: date,
     listing_index: dict[tuple[str, str], int],
     warnings: list[str],
-    profile_ids: Optional[list[int]] = None,
+    profile_pairs: Optional[list[tuple[int, int]]] = None,
 ) -> int:
     try:
         payloads = await _call_method_for_window(
@@ -254,7 +281,7 @@ async def _sync_endpoint(
             sids=sids,
             start=start,
             end=end,
-            profile_ids=profile_ids or [],
+            profile_pairs=profile_pairs or [],
         )
     except Exception as exc:  # pragma: no cover - remote behavior
         warnings.append(f"{endpoint} 同步失败：{_safe_error(exc)}")
@@ -271,41 +298,46 @@ async def _call_method_for_window(
     sids: list[int],
     start: date,
     end: date,
-    profile_ids: list[int],
+    profile_pairs: list[tuple[int, int]],
 ) -> list[Any]:
     signature = inspect.signature(method)
     names = set(signature.parameters)
     dates = [start + timedelta(days=index) for index in range((end - start).days + 1)]
-    singular_profiles = "profile_id" in names and "profile_ids" not in names
     per_day = any(name in names for name in ("report_date", "date")) and not any(
         name in names for name in ("start_date", "start_time", "begin_date")
     )
-    calls: list[tuple[Optional[date], Optional[int]]] = []
-    date_values = dates if per_day else [None]
-    profile_values: list[Optional[int]] = (
-        profile_ids if singular_profiles and profile_ids else [None]
-    )
-    for day in date_values:
-        for profile_id in profile_values:
-            calls.append((day, profile_id))
+    needs_profile = "profile_id" in names
+    if needs_profile and not profile_pairs:
+        return []
+
+    calls: list[tuple[Optional[date], list[int], Optional[int]]] = []
+    for day in dates if per_day else [None]:
+        if needs_profile:
+            for sid, profile_id in profile_pairs:
+                calls.append((day, [sid], profile_id))
+        else:
+            calls.append((day, sids, None))
 
     results: list[Any] = []
-    for day, profile_id in calls:
+    for day, call_sids, profile_id in calls:
         offset = 0
+        next_token: Optional[str] = None
+        seen_tokens: set[str] = set()
         while True:
             kwargs, missing = _build_kwargs(
                 signature,
-                sids=sids,
+                sids=call_sids,
                 start=start,
                 end=end,
                 day=day,
-                profile_ids=profile_ids,
                 profile_id=profile_id,
                 offset=offset,
+                next_token=next_token,
             )
             if missing:
                 raise RuntimeError(
-                    f"{getattr(method, '__qualname__', method)} 缺少参数：{', '.join(missing)}"
+                    f"{getattr(method, '__qualname__', method)} 缺少参数："
+                    + ", ".join(missing)
                 )
             payload = method(**kwargs)
             if inspect.isawaitable(payload):
@@ -314,11 +346,22 @@ async def _call_method_for_window(
             results.append(plain)
             records = extract_records(plain)
             total = _as_int(plain.get("total_count")) if isinstance(plain, dict) else None
-            if "offset" not in names or not records or len(records) < 1000:
+            returned_token = (
+                str(plain.get("next_token") or "").strip()
+                if isinstance(plain, dict)
+                else ""
+            )
+            if "next_token" in names and returned_token:
+                if returned_token in seen_tokens:
+                    break
+                seen_tokens.add(returned_token)
+                next_token = returned_token
+                continue
+            if "offset" not in names or not records or len(records) < PAGE_SIZE:
                 break
             if total is not None and offset + len(records) >= total:
                 break
-            offset += 1000
+            offset += PAGE_SIZE
     return results
 
 
@@ -329,31 +372,31 @@ def _build_kwargs(
     start: date,
     end: date,
     day: Optional[date],
-    profile_ids: list[int],
     profile_id: Optional[int],
     offset: int,
+    next_token: Optional[str],
 ) -> tuple[dict[str, Any], list[str]]:
     start_dt = datetime.combine(start, time.min)
     end_dt = datetime.combine(end, time.max)
+    exclusive_end = end + timedelta(days=1)
     candidates: dict[str, Any] = {
         "sids": sids,
-        "sid": sids[0] if len(sids) == 1 else sids,
+        "sid": sids[0] if len(sids) == 1 else None,
         "seller_ids": sids,
-        "seller_id": sids[0] if len(sids) == 1 else sids,
+        "seller_id": sids[0] if len(sids) == 1 else None,
         "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
+        "end_date": exclusive_end.isoformat(),
         "begin_date": start.isoformat(),
         "report_date": (day or end).isoformat(),
         "date": (day or end).isoformat(),
-        "start_time": int(start_dt.timestamp()),
-        "end_time": int(end_dt.timestamp()),
-        "profile_ids": profile_ids or None,
-        "profile_id": profile_id or (profile_ids[0] if len(profile_ids) == 1 else None),
+        "start_time": start_dt,
+        "end_time": end_dt,
+        "profile_id": profile_id,
         "offset": offset,
-        "length": 1000,
-        "page": offset // 1000 + 1,
-        "page_size": 1000,
-        "date_type": "order_time",
+        "length": PAGE_SIZE,
+        "page": offset // PAGE_SIZE + 1,
+        "page_size": PAGE_SIZE,
+        "next_token": next_token,
     }
     kwargs: dict[str, Any] = {}
     missing: list[str] = []
@@ -373,33 +416,77 @@ def _build_kwargs(
 
 METRIC_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     "orders": {
-        "sales_amount": ("sales_amount", "order_amount", "item_price", "amount", "revenue"),
-        "units": ("quantity", "sales_quantity", "units", "units_ordered"),
-        "order_count": ("order_count", "orders"),
+        "sales_amount": (
+            "sales_amt",
+            "sales_received_amt",
+            "item_sales_amt",
+            "sales_amount",
+        ),
+        "units": (
+            "order_qty",
+            "quantity_ordered",
+            "quantity",
+            "sales_quantity",
+            "units",
+            "units_ordered",
+        ),
     },
     "after_sales": {
-        "refund_amount": ("refund_amount", "return_amount", "amount"),
-        "refund_count": ("refund_count", "return_count", "quantity"),
+        "refund_amount": (
+            "order_refund_amt",
+            "refund_amt",
+            "refund_amount",
+            "return_amount",
+        ),
+        "refund_count": (
+            "service_qty",
+            "return_qty",
+            "refund_count",
+            "return_count",
+            "quantity",
+        ),
     },
     "fba_inventory": {
         "fba_available": (
-            "available_quantity", "afn_fulfillable_quantity", "afn_fulfillable",
-            "fulfillable_quantity"
+            "afn_fulfillable_qty",
+            "available_quantity",
+            "afn_fulfillable_quantity",
+            "afn_fulfillable",
+            "fulfillable_quantity",
         ),
         "fba_inbound": (
-            "inbound_quantity", "afn_inbound_shipped_quantity", "afn_inbound_shipped"
+            "afn_inbound_shipped_qty",
+            "afn_inbound_working_qty",
+            "afn_inbound_receiving_qty",
+            "inbound_quantity",
+            "afn_inbound_shipped_quantity",
+            "afn_inbound_shipped",
         ),
-        "fba_reserved": ("reserved_quantity", "afn_reserved_quantity"),
+        "fba_reserved": (
+            "afn_reserved_fc_processing_qty",
+            "afn_reserved_fc_transfers_qty",
+            "afn_reserved_customer_order_qty",
+            "reserved_quantity",
+            "afn_reserved_quantity",
+        ),
     },
     "sp_product_report": {
         "impressions": ("impressions",),
         "clicks": ("clicks",),
         "ad_spend": ("spend", "cost", "advertising_cost"),
         "ad_sales": (
-            "sales", "attributed_sales", "sales_amount", "sales_7d", "sales_14d"
+            "sales",
+            "attributed_sales",
+            "sales_amount",
+            "sales_7d",
+            "sales_14d",
         ),
         "ad_orders": (
-            "orders", "attributed_orders", "purchases", "orders_7d", "orders_14d"
+            "orders",
+            "attributed_orders",
+            "purchases",
+            "orders_7d",
+            "orders_14d",
         ),
         "ad_units": ("units", "attributed_units_ordered", "units_sold"),
         "ctr": ("ctr", "click_through_rate"),
@@ -410,9 +497,25 @@ METRIC_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 DATE_KEYS = (
-    "date", "report_date", "stat_date", "data_date", "day", "purchase_date",
-    "order_date", "order_time", "refund_date", "return_date",
+    "date",
+    "report_date",
+    "stat_date",
+    "data_date",
+    "day",
+    "purchase_time_loc",
+    "purchase_time",
+    "purchase_time_utc",
+    "service_time_loc",
+    "service_time",
+    "return_time_loc",
+    "refund_time_loc",
+    "purchase_date",
+    "order_date",
+    "order_time",
+    "refund_date",
+    "return_date",
 )
+ORDER_ID_KEYS = ("amazon_order_id", "order_id", "order_number")
 
 
 def _persist_payload(
@@ -427,7 +530,8 @@ def _persist_payload(
         return 0
     grouped: dict[tuple[str, int, str, str], list[float]] = {}
     dimensions_by_key: dict[tuple[str, int, str, str], dict[str, Any]] = {}
-    for record in _iter_product_records(payload):
+    order_ids: dict[tuple[str, int], set[str]] = {}
+    for record_index, record in enumerate(_iter_product_records(payload)):
         lowered = {str(key).lower(): value for key, value in record.items()}
         listing_id = _match_listing(lowered, listing_index)
         if listing_id is None:
@@ -440,19 +544,38 @@ def _persist_payload(
                 continue
         if metric_date < start or metric_date > end:
             continue
+        metric_date_text = metric_date.isoformat()
         dimensions = {
             key: value
             for key, value in record.items()
             if str(key).lower()
-            in {"sid", "profile_id", "campaign_id", "ad_group_id", "currency", "currency_code"}
+            in {
+                "sid",
+                "profile_id",
+                "campaign_id",
+                "ad_group_id",
+                "currency",
+                "currency_code",
+                "order_currency_code",
+            }
         }
         for metric_code, keys in aliases.items():
             value = _first_number(lowered, keys)
             if value is None:
                 continue
-            unique = (metric_date.isoformat(), listing_id, metric_code, endpoint)
+            if metric_code == "refund_amount":
+                value = abs(value)
+            unique = (metric_date_text, listing_id, metric_code, endpoint)
             grouped.setdefault(unique, []).append(value)
             dimensions_by_key[unique] = dimensions
+        if endpoint == "orders":
+            order_id = _first_text(lowered, ORDER_ID_KEYS) or f"record-{record_index}"
+            order_ids.setdefault((metric_date_text, listing_id), set()).add(order_id)
+
+    for (metric_date, listing_id), identifiers in order_ids.items():
+        unique = (metric_date, listing_id, "order_count", "orders")
+        grouped[unique] = [float(len(identifiers))]
+        dimensions_by_key.setdefault(unique, {})
 
     for (metric_date, listing_id, metric_code, source), values in grouped.items():
         if metric_code in {"ctr", "cpc", "cvr", "acos", "roas"}:
@@ -474,7 +597,8 @@ def _persist_payload(
 
 
 def _iter_product_records(
-    value: Any, inherited: Optional[dict[str, Any]] = None
+    value: Any,
+    inherited: Optional[dict[str, Any]] = None,
 ) -> Iterable[dict[str, Any]]:
     inherited = inherited or {}
     if isinstance(value, list):
@@ -512,12 +636,17 @@ def _build_listing_index(rows: list[dict[str, Any]]) -> dict[tuple[str, str], in
 
 
 def _match_listing(
-    record: dict[str, Any], index: dict[tuple[str, str], int]
+    record: dict[str, Any],
+    index: dict[tuple[str, str], int],
 ) -> Optional[int]:
     sid = str(record.get("sid") or record.get("seller_id") or "").strip()
     identifiers = (
-        record.get("asin"), record.get("child_asin"), record.get("msku"),
-        record.get("seller_sku"), record.get("lsku"), record.get("local_sku"),
+        record.get("asin"),
+        record.get("child_asin"),
+        record.get("msku"),
+        record.get("seller_sku"),
+        record.get("lsku"),
+        record.get("local_sku"),
     )
     if sid:
         for value in identifiers:
@@ -545,9 +674,12 @@ def _record_date(record: dict[str, Any]) -> Optional[date]:
             continue
         try:
             if text.isdigit() and len(text) >= 10:
-                return datetime.fromtimestamp(int(text[:10])).date()
+                timestamp = int(text)
+                if len(text) > 10:
+                    timestamp //= 1000
+                return datetime.fromtimestamp(timestamp).date()
             return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
-        except (ValueError, OSError):
+        except (ValueError, OSError, OverflowError):
             try:
                 return date.fromisoformat(text[:10])
             except ValueError:
@@ -555,43 +687,67 @@ def _record_date(record: dict[str, Any]) -> Optional[date]:
     return None
 
 
-def _selected_profile_ids(
-    profiles: list[dict[str, Any]], sids: list[int]
-) -> list[int]:
-    selected: list[int] = []
-    all_ids: list[int] = []
+def _selected_profile_pairs(
+    profiles: list[dict[str, Any]],
+    sids: list[int],
+) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    selected_sid_set = set(sids)
     for row in profiles:
         profile_id = _as_int(
             row.get("profile_id") or row.get("profileId") or row.get("id")
         )
+        sid = _as_int(row.get("sid") or row.get("seller_id"))
         if profile_id is None:
             continue
-        all_ids.append(profile_id)
-        sid = _as_int(row.get("sid") or row.get("seller_id"))
-        if sid is not None and sid in sids:
-            selected.append(profile_id)
-    return sorted(set(selected or all_ids))
+        if sid is None and len(sids) == 1:
+            sid = sids[0]
+        if sid is not None and sid in selected_sid_set:
+            pairs.append((sid, profile_id))
+    return sorted(set(pairs))
+
+
+def _first_text(record: dict[str, Any], keys: tuple[str, ...]) -> Optional[str]:
+    for key in keys:
+        value = record.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 def _first_number(
-    record: dict[str, Any], keys: tuple[str, ...]
+    record: dict[str, Any],
+    keys: tuple[str, ...],
 ) -> Optional[float]:
     for key in keys:
         value = record.get(key)
         if value is None or isinstance(value, bool):
             continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip().replace(",", "")
+        if not text:
+            continue
+        percent = "%" in text
+        normalized = re.sub(r"[^0-9.\-+]", "", text)
+        if normalized in {"", "+", "-", "."}:
+            continue
         try:
-            text = str(value).replace(",", "").strip()
-            percent = text.endswith("%")
-            number = float(text.rstrip("%"))
+            number = float(normalized)
             return number / 100 if percent else number
-        except (TypeError, ValueError):
+        except ValueError:
             continue
     return None
 
 
 def _metric_unit(metric_code: str) -> str:
-    if metric_code in {"sales_amount", "refund_amount", "ad_spend", "ad_sales", "cpc"}:
+    if metric_code in {
+        "sales_amount",
+        "refund_amount",
+        "ad_spend",
+        "ad_sales",
+        "cpc",
+    }:
         return "currency"
     if metric_code in {"ctr", "cvr", "acos"}:
         return "ratio"
