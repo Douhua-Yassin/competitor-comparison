@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from datetime import date, timedelta
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from openpyxl import Workbook
 
@@ -20,7 +25,7 @@ from app.reporting.targets import import_targets
 
 
 def main() -> None:
-    root = Path("artifacts/reporting-sample")
+    root = PROJECT_ROOT / "artifacts" / "reporting-sample"
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
@@ -88,6 +93,7 @@ def main() -> None:
         "base_url": "",
         "model": "",
         "timeout": 90,
+        "max_tokens": 4096,
     }
     try:
         output = generate_report(
