@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from app.reporting.dashboard_db import (
+    connection,
     create_sync_run,
     finish_sync_run,
     init_dashboard_db,
@@ -179,6 +180,54 @@ def test_acceptance_detects_scope_change_after_sync(tmp_path: Path) -> None:
     assert any("当前设置为 2 个" in item for item in result["blocking_issues"])
 
 
+def test_deleted_listing_is_excluded_from_current_scope(tmp_path: Path) -> None:
+    database = tmp_path / "reporting.db"
+    first, second = _seed_products(database)
+    with connection(database) as db:
+        db.execute("UPDATE lx_listings SET deleted=1 WHERE id=?", (second,))
+    run_id = create_sync_run("2026-07-24", "2026-08-06", database)
+    finish_sync_run(
+        run_id,
+        "success",
+        catalog_count=2,
+        selected_count=1,
+        metric_count=0,
+        message="同步完成",
+        details={},
+        db_path=database,
+    )
+
+    result = build_sync_acceptance(database)
+
+    assert first != second
+    assert result["catalog"]["active_listings"] == 2
+    assert result["catalog"]["selected_listings"] == 1
+    assert result["blocking_issues"] == []
+
+
+def test_acceptance_redacts_secret_assignments(tmp_path: Path) -> None:
+    database = tmp_path / "reporting.db"
+    _seed_products(database)
+    run_id = create_sync_run("2026-07-24", "2026-08-06", database)
+    finish_sync_run(
+        run_id,
+        "failed",
+        catalog_count=3,
+        selected_count=2,
+        metric_count=0,
+        message="请求失败 access_token=real-token-value",
+        details={"warnings": ["app_secret=real-secret-value"]},
+        db_path=database,
+    )
+
+    result = build_sync_acceptance(database)
+    serialized = json.dumps(result, ensure_ascii=False)
+
+    assert "real-token-value" not in serialized
+    assert "real-secret-value" not in serialized
+    assert "***redacted***" in serialized
+
+
 def test_acceptance_export_writes_markdown_and_json(tmp_path: Path) -> None:
     database = tmp_path / "reporting.db"
     _seed_products(database)
@@ -205,6 +254,7 @@ def test_acceptance_export_writes_markdown_and_json(tmp_path: Path) -> None:
     assert payload["latest_run"]["selected_count"] == 2
     assert markdown_path.parent.parent == output
     assert json_path.parent.parent == output
+    assert markdown_path.parent != json_path.parent
 
 
 def test_acceptance_rejects_unknown_export_format(tmp_path: Path) -> None:
