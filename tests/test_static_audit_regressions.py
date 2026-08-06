@@ -10,9 +10,8 @@ from fastapi import HTTPException
 
 import app.main as main
 from app.lingxing_audit.config import AuditConfigurationError, AuditSettings
-from app.reporting import dashboard_routes, lingxing_sync, report_archive, targets
+from app.reporting import lingxing_sync, report_archive, targets
 from app.reporting.dashboard_service import _aggregate
-from app.reporting.report_generator import _safe_filename_component
 
 
 def test_competitor_crawl_reserves_batch_before_background_task(monkeypatch):
@@ -108,6 +107,9 @@ def test_reporting_sync_start_reservation_is_atomic():
 
 
 def test_reporting_task_creation_failure_releases_reservation(monkeypatch):
+    pytest.importorskip("docx")
+    from app.reporting import dashboard_routes
+
     lingxing_sync._SYNC_STATUS["running"] = False
 
     def fail(coro):
@@ -159,7 +161,6 @@ def test_dashboard_ratios_are_derived_from_additive_totals():
                     "metric_value": value,
                 }
             )
-        # Deliberately misleading source ratios. The aggregate must not average them.
         rows.extend(
             [
                 {"metric_date": "2026-08-04", "listing_id": listing_id, "metric_code": "ctr", "metric_value": 0.9},
@@ -252,6 +253,9 @@ def test_report_archive_rejects_tampered_file(tmp_path: Path, monkeypatch):
 
 
 def test_report_filename_component_is_windows_safe_and_bounded():
+    pytest.importorskip("docx")
+    from app.reporting.report_generator import _safe_filename_component
+
     value = "足球门" * 100 + '/:*?"<>|'
     result = _safe_filename_component(value)
     assert len(result) <= 80
