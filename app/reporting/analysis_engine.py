@@ -18,6 +18,15 @@ ANALYSIS_KEYS = (
     "support_needed",
 )
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?%?")
+DEFAULT_MODEL = "deepseek-v4-flash"
+JSON_EXAMPLE = {
+    "executive_summary": ["总体结论"],
+    "performance": ["表现判断"],
+    "causes": ["变化原因"],
+    "risks": ["主要风险"],
+    "actions": ["下一步动作"],
+    "support_needed": ["需要的支持"],
+}
 
 
 @dataclass(frozen=True)
@@ -44,8 +53,10 @@ def generate_analysis(
         "不得创造、修改或补齐任何数字；缺失数据必须明确写缺失。"
         "不得猜测未提供的促销、广告操作、库存到货或市场事件。"
         "将人工记录中的已执行操作、判断、原因、计划和所需支持融入分析。"
-        "只返回JSON对象，字段为 executive_summary、performance、causes、risks、actions、"
-        "support_needed，每个字段必须是字符串数组。不要使用Markdown。\n\n"
+        "只返回JSON对象，不要使用Markdown。每个字段必须是字符串数组。"
+        "JSON结构示例："
+        + json.dumps(JSON_EXAMPLE, ensure_ascii=False)
+        + "\n\n确定上下文："
         + json.dumps(context, ensure_ascii=False, default=str)
     )
     try:
@@ -61,17 +72,26 @@ def generate_analysis(
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是严谨的亚马逊经营分析助手，只能使用用户提供的数据和记录。",
+                        "content": "你是严谨的亚马逊经营分析助手，只能使用用户提供的数据和记录，并严格输出JSON。",
                     },
                     {"role": "user", "content": prompt},
                 ],
+                "thinking": {"type": "disabled"},
                 "response_format": {"type": "json_object"},
                 "temperature": 0.1,
+                "max_tokens": settings["max_tokens"],
             },
             timeout=settings["timeout"],
         )
         response.raise_for_status()
-        raw = str(response.json()["choices"][0]["message"]["content"])
+        payload = response.json()
+        choice = payload["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise ValueError("DeepSeek输出达到max_tokens并被截断")
+        content = choice["message"].get("content")
+        if not content or not str(content).strip():
+            raise ValueError("DeepSeek返回空content")
+        raw = str(content)
         parsed = json.loads(raw)
         validated = _validate_analysis(parsed)
         _reject_unseen_numbers(validated, context)
@@ -88,17 +108,23 @@ def deepseek_settings(root: Path) -> dict[str, Any]:
     def read(name: str, default: str = "") -> str:
         return str(os.getenv(name) or values.get(name) or default).strip()
 
-    timeout_text = read("DEEPSEEK_TIMEOUT_SECONDS", "90")
-    try:
-        timeout = max(10, min(300, int(timeout_text)))
-    except ValueError:
-        timeout = 90
+    timeout = _bounded_int(read("DEEPSEEK_TIMEOUT_SECONDS", "90"), 90, 10, 300)
+    max_tokens = _bounded_int(read("DEEPSEEK_MAX_TOKENS", "4096"), 4096, 512, 16384)
     return {
         "api_key": read("DEEPSEEK_API_KEY"),
         "base_url": read("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "model": read("DEEPSEEK_MODEL", "deepseek-chat"),
+        "model": read("DEEPSEEK_MODEL", DEFAULT_MODEL),
         "timeout": timeout,
+        "max_tokens": max_tokens,
     }
+
+
+def _bounded_int(value: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def _validate_analysis(value: Any) -> dict[str, list[str]]:
