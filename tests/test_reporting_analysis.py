@@ -72,3 +72,12 @@ def test_deepseek_unseen_number_falls_back_and_records_warning(monkeypatch, tmp_
     assert result.source == "rules_fallback"
     assert result.analysis == _fallback()
     assert "不存在的数字" in (result.warning or "")
+
+
+def test_legacy_deepseek_model_names_are_migrated(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
+    settings = analysis_engine.deepseek_settings(tmp_path)
+    assert settings["model"] == "deepseek-v4-flash"
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-reasoner")
+    settings = analysis_engine.deepseek_settings(tmp_path)
+    assert settings["model"] == "deepseek-v4-pro"
