@@ -16,15 +16,18 @@ from app.reporting.dashboard_service import dashboard
 from app.reporting.targets import import_targets, target_status, targets_for_period
 
 
+HEADERS = [
+    "周期类型", "周期", "产品线", "店铺SID", "ASIN", "MSKU",
+    "销售额目标", "销量目标", "利润目标", "利润率目标",
+    "TACOS目标", "广告花费目标", "FBA可售库存目标", "备注",
+]
+
+
 def _write_targets(path: Path, sales_target: float = 50000) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "目标"
-    sheet.append([
-        "周期类型", "周期", "产品线", "店铺SID", "ASIN", "MSKU",
-        "销售额目标", "销量目标", "利润目标", "利润率目标",
-        "TACOS目标", "广告花费目标", "FBA可售库存目标", "备注",
-    ])
+    sheet.append(HEADERS)
     sheet.append(["月", "2026-08", "足球门", "", "", "", sales_target, 600, "", "", "12%", 7000, 300, "月目标"])
     workbook.save(path)
 
@@ -67,3 +70,40 @@ def test_target_import_is_versioned_and_visible_on_month_dashboard(tmp_path: Pat
     revised = next(item for item in targets if item["metric_code"] == "sales_amount")
     assert revised["target"] == 60000
     assert target_status(db_path)["active_target_count"] == 5
+
+
+def test_listing_target_uses_only_matching_listing_actual(tmp_path: Path):
+    db_path = tmp_path / "reporting.db"
+    upsert_stores([{"sid": 10, "name": "美国店", "country": "美国"}], db_path)
+    upsert_listings(
+        [
+            {"sid": 10, "asin": "B000TEST01", "msku": "GOAL-01", "product_name": "足球门6x4", "country": "美国", "status": 1},
+            {"sid": 10, "asin": "B000TEST02", "msku": "GOAL-02", "product_name": "足球门8x6", "country": "美国", "status": 1},
+        ],
+        db_path,
+    )
+    products = list_settings_products(db_path)["products"]
+    for product in products:
+        update_listing_scope(product["id"], "key", "足球门", db_path)
+    first = next(item for item in products if item["msku"] == "GOAL-01")
+    second = next(item for item in products if item["msku"] == "GOAL-02")
+    upsert_daily_metric("2026-08-04", first["id"], "sales_amount", 300, "currency", "orders", db_path=db_path)
+    upsert_daily_metric("2026-08-04", second["id"], "sales_amount", 700, "currency", "orders", db_path=db_path)
+
+    target_path = tmp_path / "目标表.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "目标"
+    sheet.append(HEADERS)
+    sheet.append(["月", "2026-08", "足球门", 10, "", "GOAL-01", 1000, "", "", "", "", "", "", "单品目标"])
+    workbook.save(target_path)
+    import_targets(target_path, db_path)
+
+    data = dashboard(db_path, date(2026, 8, 4))
+    month = next(item for item in data["product_lines"][0]["windows"] if item["code"] == "month")
+    target = next(item for item in month["targets"] if item["metric_code"] == "sales_amount")
+    assert month["summary"]["sales_amount"] == 1000
+    assert target["actual"] == 300
+    assert target["target"] == 1000
+    assert target["completion"] == 0.3
+    assert "GOAL-01" in target["scope_note"]
