@@ -22,6 +22,7 @@ from .lingxing_sync import (
     sync_status,
 )
 from .report_archive import list_report_runs, resolve_report_artifact
+from .sync_acceptance import build_sync_acceptance, write_acceptance_report
 from .targets import import_targets, target_status, write_target_template
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,8 @@ router = APIRouter()
 templates = Jinja2Templates(directory=ROOT / "app" / "templates")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8"
+JSON_MEDIA_TYPE = "application/json; charset=utf-8"
 
 
 @router.get("/reporting", response_class=HTMLResponse)
@@ -94,6 +97,26 @@ def api_report_archive(report_id: int):
     )
 
 
+@router.get("/api/reporting/acceptance/latest")
+def api_acceptance_latest():
+    return build_sync_acceptance()
+
+
+@router.get("/api/reporting/acceptance/export")
+def api_acceptance_export(file_format: str = "md"):
+    try:
+        path = write_acceptance_report(file_format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    media_type = MARKDOWN_MEDIA_TYPE if path.suffix.lower() == ".md" else JSON_MEDIA_TYPE
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=path.name,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(path.name)}"},
+    )
+
+
 @router.get("/api/reporting/diagnostics")
 def api_diagnostics():
     database_ok = False
@@ -140,6 +163,10 @@ def api_diagnostics():
             "config_error": lingxing_config_error,
         },
         "targets": target_status(),
+        "sync_acceptance": {
+            "available": database_ok,
+            "endpoint": "/api/reporting/acceptance/latest",
+        },
         "proxy": {
             "active_environment_variables": active_proxy_variables,
             "loopback_bypassed": "127.0.0.1" in no_proxy_items
