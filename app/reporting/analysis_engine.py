@@ -19,6 +19,10 @@ ANALYSIS_KEYS = (
 )
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?%?")
 DEFAULT_MODEL = "deepseek-v4-flash"
+LEGACY_MODELS = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+}
 JSON_EXAMPLE = {
     "executive_summary": ["总体结论"],
     "performance": ["表现判断"],
@@ -110,10 +114,12 @@ def deepseek_settings(root: Path) -> dict[str, Any]:
 
     timeout = _bounded_int(read("DEEPSEEK_TIMEOUT_SECONDS", "90"), 90, 10, 300)
     max_tokens = _bounded_int(read("DEEPSEEK_MAX_TOKENS", "4096"), 4096, 512, 16384)
+    configured_model = read("DEEPSEEK_MODEL", DEFAULT_MODEL)
+    model = LEGACY_MODELS.get(configured_model, configured_model)
     return {
         "api_key": read("DEEPSEEK_API_KEY"),
         "base_url": read("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "model": read("DEEPSEEK_MODEL", DEFAULT_MODEL),
+        "model": model,
         "timeout": timeout,
         "max_tokens": max_tokens,
     }
