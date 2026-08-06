@@ -57,3 +57,19 @@ jobs:
               throw "Missing reporting dependency: $required"
             }
           }
+
+      - name: Build Word visual review sample
+        shell: powershell
+        run: |
+          python tests/generate_reporting_sample.py
+          if ($LASTEXITCODE -ne 0) { throw 'Reporting sample generation failed' }
+          $sample = Get-ChildItem artifacts/reporting-sample -Filter *.docx | Select-Object -First 1
+          if (-not $sample) { throw 'Reporting sample DOCX was not generated' }
+
+      - name: Upload Word visual review sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporting-word-sample
+          path: artifacts/reporting-sample/*.docx
+          if-no-files-found: error
+          retention-days: 7
