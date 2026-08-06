@@ -1,4 +1,4 @@
-const acceptanceState = { timer: null, lastRunId: null };
+const acceptanceState = { timer: null };
 
 async function acceptanceApi(url) {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
@@ -82,7 +82,7 @@ function renderAcceptance(payload) {
             </dl>
           </article>`;
       }).join("")
-    : '<p class="acceptance-muted">尚无可展示的接口验收结果。</p>';
+    : `<p class="acceptance-muted">${payload.state === "syncing" ? "同步进行中，完成后显示接口验收结果。" : "尚无可展示的接口验收结果。"}</p>`;
 
   const productLines = payload.product_lines || [];
   lines.innerHTML = productLines.length
@@ -107,8 +107,6 @@ function renderAcceptance(payload) {
         </tbody>
       </table>`
     : '<p class="acceptance-muted">当前没有重点或普通产品线。</p>';
-
-  acceptanceState.lastRunId = payload.latest_run?.id || null;
 }
 
 async function loadAcceptance() {
@@ -127,10 +125,10 @@ async function loadAcceptance() {
 async function watchAcceptance() {
   try {
     const status = await acceptanceApi("/api/reporting/sync-status");
-    if (!status.running) {
-      const payload = await acceptanceApi("/api/reporting/acceptance/latest");
-      const runId = payload.latest_run?.id || null;
-      if (runId !== acceptanceState.lastRunId) renderAcceptance(payload);
+    const payload = await acceptanceApi("/api/reporting/acceptance/latest");
+    renderAcceptance(payload);
+    if (status.running && payload.state !== "syncing") {
+      document.getElementById("acceptanceMessage").textContent = "领星数据同步仍在运行。";
     }
   } catch (_) {}
   acceptanceState.timer = setTimeout(watchAcceptance, 5000);
