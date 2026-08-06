@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.lingxing_audit.config import AuditSettings
 
+from .acceptance_service import build_sync_acceptance, write_acceptance_report
 from .dashboard_db import DB_PATH, connection, list_settings_products, save_note, update_listing_scope
 from .dashboard_models import ListingScopeUpdate, NoteSave
 from .dashboard_service import dashboard
@@ -22,7 +23,6 @@ from .lingxing_sync import (
     sync_status,
 )
 from .report_archive import list_report_runs, resolve_report_artifact
-from .sync_acceptance import build_sync_acceptance, write_acceptance_report
 from .targets import import_targets, target_status, write_target_template
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -181,6 +181,11 @@ def api_diagnostics():
 
 @router.put("/api/reporting/products/scope")
 def api_update_product_scope(payload: ListingScopeUpdate):
+    if sync_status().get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail="领星数据同步期间不能修改负责范围，请等待同步完成。",
+        )
     try:
         return update_listing_scope(
             payload.listing_id,
