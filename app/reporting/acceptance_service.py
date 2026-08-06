@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -13,11 +13,14 @@ from .sync_acceptance import (
     build_sync_acceptance as build_base_acceptance,
 )
 
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?i)\bauthorization\b(\s*[:=]\s*)([^\r\n,;]+)"
+)
 _SENSITIVE_ASSIGNMENT = re.compile(
     r"(?i)\b("
     r"app[_-]?id|app[_-]?secret|client[_-]?secret|api[_-]?key|"
     r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|"
-    r"authorization|signature|sign"
+    r"signature|sign"
     r")\b(\s*[:=]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
@@ -46,6 +49,7 @@ def build_sync_acceptance(
     db_path: Optional[Path] = None,
     *,
     generated_at: Optional[str] = None,
+    runtime_running: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Return the public acceptance payload with runtime-state and secret hardening."""
     path = Path(db_path or DB_PATH)
@@ -56,18 +60,34 @@ def build_sync_acceptance(
         return payload
 
     if latest.get("status") == "running":
+        if runtime_running is None:
+            try:
+                from .lingxing_sync import sync_status
+
+                runtime_running = bool(sync_status().get("running"))
+            except Exception:  # pragma: no cover - defensive import boundary
+                runtime_running = False
+        if runtime_running:
+            payload.update(
+                state="syncing",
+                message="领星数据同步仍在运行，验收结果将在同步完成后生成。",
+                endpoints=[],
+                product_lines=[],
+                blocking_issues=[],
+            )
+            payload.setdefault("advisories", []).insert(
+                0,
+                "当前页面不会使用同步中的半成品指标进行覆盖率判断。",
+            )
+            return payload
         payload.update(
-            state="syncing",
-            message="领星数据同步仍在运行，验收结果将在同步完成后生成。",
+            state="interrupted",
+            message="检测到上一次同步未正常结束，请重新执行同步。",
             endpoints=[],
             product_lines=[],
-            blocking_issues=[],
+            blocking_issues=["上一次同步记录仍为running，但当前没有同步任务在运行。"],
         )
-        payload.setdefault("advisories", []).insert(
-            0,
-            "当前页面不会使用同步中的半成品指标进行覆盖率判断。",
-        )
-        return payload
+        return _sanitize_value(payload)
 
     blocking = list(payload.get("blocking_issues") or [])
     for warning in latest.get("warnings") or []:
@@ -143,9 +163,10 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _sanitize_value(value: Any) -> Any:
@@ -162,11 +183,15 @@ def _sanitize_value(value: Any) -> Any:
 
 def _sanitize_text(value: Any) -> str:
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    text = _AUTHORIZATION_HEADER.sub(
+        lambda match: f"Authorization{match.group(1)}***redacted***",
+        text,
+    )
+    text = _BEARER_TOKEN.sub("Bearer ***redacted***", text)
     text = _SENSITIVE_ASSIGNMENT.sub(
         lambda match: f"{match.group(1)}{match.group(2)}***redacted***",
         text,
     )
-    text = _BEARER_TOKEN.sub("Bearer ***redacted***", text)
     return _URL_SECRET.sub(lambda match: f"{match.group(1)}***redacted***", text)
 
 
