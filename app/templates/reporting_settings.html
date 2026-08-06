@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>产品设置</title>
   <link rel="stylesheet" href="/static/reporting-dashboard.css">
+  <link rel="stylesheet" href="/static/reporting-targets.css">
 </head>
 <body>
   <header class="topbar compact">
@@ -20,6 +21,18 @@
   </header>
 
   <main>
+    <section class="target-settings-card">
+      <div>
+        <h2>目标表</h2>
+        <p>目标不在网页填写。编辑项目根目录的“目标表.xlsx”，然后在这里重新读取。</p>
+      </div>
+      <div class="target-settings-actions">
+        <a href="/api/reporting/targets/template">下载目标表模板</a>
+        <button id="targetImportButton" type="button">读取目标表.xlsx</button>
+      </div>
+      <div id="targetImportStatus" class="target-import-status">正在读取目标状态……</div>
+    </section>
+
     <section class="filter-bar">
       <label>国家<select id="countryFilter"><option value="">全部国家</option></select></label>
       <label>店铺<select id="storeFilter"><option value="">全部店铺</option></select></label>
@@ -34,11 +47,12 @@
   <dialog id="messageDialog">
     <form method="dialog">
       <h3 id="dialogTitle">提示</h3>
-      <p id="dialogBody"></p>
+      <div id="dialogBody"></div>
       <button>关闭</button>
     </form>
   </dialog>
 
+  <script src="/static/reporting-target-settings.js"></script>
   <script src="/static/reporting-settings.js"></script>
 </body>
 </html>

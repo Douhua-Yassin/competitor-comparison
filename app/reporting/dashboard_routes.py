@@ -16,11 +16,15 @@ from .dashboard_db import DB_PATH, connection, list_settings_products, save_note
 from .dashboard_models import ListingScopeUpdate, NoteSave
 from .dashboard_service import dashboard
 from .lingxing_sync import run_recent_sync, sync_status
+from .report_archive import list_report_runs, resolve_report_artifact
 from .report_generator import generate_report
+from .targets import import_targets, target_status, write_target_template
 
 ROOT = Path(__file__).resolve().parents[2]
 router = APIRouter()
 templates = Jinja2Templates(directory=ROOT / "app" / "templates")
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 @router.get("/reporting", response_class=HTMLResponse)
@@ -41,6 +45,49 @@ def api_dashboard():
 @router.get("/api/reporting/products")
 def api_products():
     return list_settings_products()
+
+
+@router.get("/api/reporting/targets/status")
+def api_target_status():
+    return target_status()
+
+
+@router.post("/api/reporting/targets/import")
+def api_import_targets():
+    try:
+        return import_targets()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/reporting/targets/template")
+def api_target_template():
+    path = write_target_template(ROOT / "data" / "templates" / "目标表模板.xlsx")
+    return FileResponse(
+        path,
+        media_type=XLSX_MEDIA_TYPE,
+        filename=path.name,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(path.name)}"},
+    )
+
+
+@router.get("/api/reporting/reports/history")
+def api_report_history(product_line: str | None = None, limit: int = 50):
+    return {"reports": list_report_runs(product_line, limit)}
+
+
+@router.get("/api/reporting/reports/archive/{report_id}")
+def api_report_archive(report_id: int):
+    try:
+        path = resolve_report_artifact(report_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=DOCX_MEDIA_TYPE,
+        filename=path.name,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(path.name)}"},
+    )
 
 
 @router.get("/api/reporting/diagnostics")
@@ -81,6 +128,7 @@ def api_diagnostics():
             "configured": lingxing_configured,
             "config_error": lingxing_config_error,
         },
+        "targets": target_status(),
         "proxy": {
             "active_environment_variables": active_proxy_variables,
             "loopback_bypassed": "127.0.0.1" in no_proxy_items and "localhost" in no_proxy_items,
@@ -148,9 +196,7 @@ def api_generate_report(product_line: str, report_type: str):
     filename = path.name
     return FileResponse(
         path,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        ),
+        media_type=DOCX_MEDIA_TYPE,
         filename=filename,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )

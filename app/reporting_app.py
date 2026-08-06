@@ -9,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.reporting.dashboard_db import init_dashboard_db
 from app.reporting.dashboard_routes import router as reporting_router
+from app.reporting.report_archive import init_report_archive
+from app.reporting.targets import init_targets_db
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_dashboard_db()
+    init_targets_db()
+    init_report_archive()
     yield
 
 

@@ -1,0 +1,75 @@
+name: Reporting Next Stage
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: reporting-next-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reporting-next-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install reporting dependencies
+        shell: powershell
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir -r requirements-lingxing.txt pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Reporting dependency installation failed' }
+          python -m pip check
+
+      - name: Compile reporting code
+        shell: powershell
+        run: python -m compileall -q app/reporting app/reporting_app.py tests
+
+      - name: Run next-stage tests
+        shell: powershell
+        run: |
+          python -m pytest -q tests/test_reporting_targets.py tests/test_reporting_periods.py tests/test_reporting_analysis.py tests/test_reporting_word.py tests/test_reporting_runtime.py
+          if ($LASTEXITCODE -ne 0) { throw 'Next-stage reporting tests failed' }
+
+      - name: Check reporting JavaScript
+        shell: powershell
+        run: |
+          node --check app/static/reporting-target-settings.js
+          node --check app/static/reporting-targets.js
+          node --check app/static/reporting-dashboard.js
+          node --check app/static/reporting-settings.js
+
+      - name: Verify target and chart dependencies
+        shell: powershell
+        run: |
+          python -c "import openpyxl, PIL, docx; print(openpyxl.__version__, PIL.__version__)"
+          $requirements = Get-Content -Raw -Encoding UTF8 requirements-lingxing.txt
+          foreach ($required in @('openpyxl', 'Pillow', 'python-docx')) {
+            if ($requirements -notmatch [regex]::Escape($required)) {
+              throw "Missing reporting dependency: $required"
+            }
+          }
+
+      - name: Build Word visual review sample
+        shell: powershell
+        run: |
+          python tests/generate_reporting_sample.py
+          if ($LASTEXITCODE -ne 0) { throw 'Reporting sample generation failed' }
+          $sample = Get-ChildItem artifacts/reporting-sample -Filter *.docx | Select-Object -First 1
+          if (-not $sample) { throw 'Reporting sample DOCX was not generated' }
+
+      - name: Upload Word visual review sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporting-word-sample
+          path: artifacts/reporting-sample/*.docx
+          if-no-files-found: error
+          retention-days: 7
