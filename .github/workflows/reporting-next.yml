@@ -36,7 +36,7 @@ jobs:
       - name: Run next-stage tests
         shell: powershell
         run: |
-          python -m pytest -q tests/test_reporting_targets.py tests/test_reporting_analysis.py tests/test_reporting_word.py tests/test_reporting_runtime.py
+          python -m pytest -q tests/test_reporting_targets.py tests/test_reporting_periods.py tests/test_reporting_analysis.py tests/test_reporting_word.py tests/test_reporting_runtime.py
           if ($LASTEXITCODE -ne 0) { throw 'Next-stage reporting tests failed' }
 
       - name: Check reporting JavaScript
