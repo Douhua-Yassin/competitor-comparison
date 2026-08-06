@@ -13,36 +13,55 @@ class FakeResponse:
         return None
 
     def json(self):
-        return {"choices": [{"message": {"content": json.dumps(self._content, ensure_ascii=False)}}]}
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": json.dumps(self._content, ensure_ascii=False)},
+                }
+            ]
+        }
 
 
 def _fallback():
     return {key: ["规则版"] for key in analysis_engine.ANALYSIS_KEYS}
 
 
+def _settings():
+    return {
+        "api_key": "test",
+        "base_url": "https://example.invalid",
+        "model": "deepseek-v4-flash",
+        "timeout": 10,
+        "max_tokens": 4096,
+    }
+
+
 def test_deepseek_analysis_accepts_only_structured_grounded_numbers(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        analysis_engine,
-        "deepseek_settings",
-        lambda root: {"api_key": "test", "base_url": "https://example.invalid", "model": "model", "timeout": 10},
-    )
+    monkeypatch.setattr(analysis_engine, "deepseek_settings", lambda root: _settings())
     content = {key: ["销售额为300，TACOS为10%。"] for key in analysis_engine.ANALYSIS_KEYS}
+    captured = {}
+
+    def post(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(content)
+
     result = analysis_engine.generate_analysis(
         {"sales_amount": 300, "tacos": 0.1},
         _fallback(),
         tmp_path,
-        post=lambda *args, **kwargs: FakeResponse(content),
+        post=post,
     )
     assert result.source == "deepseek"
     assert result.warning is None
+    assert captured["json"]["model"] == "deepseek-v4-flash"
+    assert captured["json"]["thinking"] == {"type": "disabled"}
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert captured["json"]["max_tokens"] == 4096
 
 
 def test_deepseek_unseen_number_falls_back_and_records_warning(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        analysis_engine,
-        "deepseek_settings",
-        lambda root: {"api_key": "test", "base_url": "https://example.invalid", "model": "model", "timeout": 10},
-    )
+    monkeypatch.setattr(analysis_engine, "deepseek_settings", lambda root: _settings())
     content = {key: ["建议把预算提高到9999。"] for key in analysis_engine.ANALYSIS_KEYS}
     result = analysis_engine.generate_analysis(
         {"sales_amount": 300},
