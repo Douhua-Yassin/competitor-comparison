@@ -8,10 +8,10 @@ import sqlite3
 import threading
 import urllib.error
 import urllib.request
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
@@ -66,13 +66,18 @@ def reset_sync_cache() -> None:
     _last_sync_result = None
 
 
-def connection() -> sqlite3.Connection:
+@contextmanager
+def connection() -> Iterator[sqlite3.Connection]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {DB_TIMEOUT_SECONDS * 1000}")
     db.execute("PRAGMA foreign_keys = ON")
-    return db
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def init_db() -> None:
@@ -463,8 +468,6 @@ def parse_seller_sprite_html(html: str, asin: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     root = soup.select_one(f'[name="seller-sprite-extension-quick-view-{asin}"]')
     if root is None:
-        root = soup.select_one('[name^="seller-sprite-extension-quick-view-"]')
-    if root is None:
         return {"seller_sprite_status": "unavailable"}
 
     def field(*labels: str) -> Optional[str]:
@@ -744,7 +747,8 @@ def save_record(record: dict[str, Any], source: str) -> None:
 
 def get_cdp_info(endpoint: str = CDP_ENDPOINT) -> Optional[dict[str, Any]]:
     try:
-        with urllib.request.urlopen(endpoint + "/json/version", timeout=2) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(endpoint + "/json/version", timeout=2) as response:
             if response.status != 200:
                 return None
             payload = json.load(response)
@@ -1011,7 +1015,21 @@ async def api_crawl():
             sync_error=None,
         )
         raise HTTPException(status_code=503, detail="请先启动插件浏览器")
-    asyncio.create_task(do_crawl(asins))
+
+    # Reserve the batch before yielding back to the event loop. Without this,
+    # two near-simultaneous requests can both schedule a crawl before do_crawl
+    # has a chance to set status["running"].
+    status.update(
+        running=True,
+        message="抓取任务已排队",
+        total=len(asins),
+        current_asin=None,
+    )
+    try:
+        asyncio.create_task(do_crawl(asins))
+    except Exception:
+        status.update(running=False, message="抓取任务启动失败")
+        raise
     return {"started": True, "total": len(asins)}
 
 

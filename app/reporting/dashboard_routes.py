@@ -15,9 +15,13 @@ from app.lingxing_audit.config import AuditSettings
 from .dashboard_db import DB_PATH, connection, list_settings_products, save_note, update_listing_scope
 from .dashboard_models import ListingScopeUpdate, NoteSave
 from .dashboard_service import dashboard
-from .lingxing_sync import run_recent_sync, sync_status
+from .lingxing_sync import (
+    cancel_sync_reservation,
+    reserve_sync_start,
+    run_recent_sync,
+    sync_status,
+)
 from .report_archive import list_report_runs, resolve_report_artifact
-from .report_generator import generate_report
 from .targets import import_targets, target_status, write_target_template
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -109,7 +113,14 @@ def api_diagnostics():
     except Exception as exc:
         lingxing_config_error = type(exc).__name__
 
-    proxy_names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    proxy_names = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
     active_proxy_variables = sorted(name for name in proxy_names if os.environ.get(name))
     no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     no_proxy_items = {item.strip().lower() for item in no_proxy.split(",") if item.strip()}
@@ -131,7 +142,8 @@ def api_diagnostics():
         "targets": target_status(),
         "proxy": {
             "active_environment_variables": active_proxy_variables,
-            "loopback_bypassed": "127.0.0.1" in no_proxy_items and "localhost" in no_proxy_items,
+            "loopback_bypassed": "127.0.0.1" in no_proxy_items
+            and "localhost" in no_proxy_items,
         },
         "browser": {
             "launch_mode": "isolated-direct",
@@ -154,8 +166,7 @@ def api_update_product_scope(payload: ListingScopeUpdate):
 
 @router.post("/api/reporting/sync")
 async def api_start_sync():
-    state = sync_status()
-    if state["running"]:
+    if not reserve_sync_start():
         raise HTTPException(status_code=409, detail="领星数据同步正在运行")
 
     async def worker() -> None:
@@ -165,7 +176,11 @@ async def api_start_sync():
             # Detailed sanitized error is retained in sync_status and lx_sync_runs.
             pass
 
-    asyncio.create_task(worker())
+    try:
+        asyncio.create_task(worker())
+    except Exception:
+        cancel_sync_reservation()
+        raise
     return {"started": True, "window_days": 14}
 
 
@@ -189,6 +204,9 @@ def api_save_note(payload: NoteSave):
 
 @router.get("/api/reporting/reports/{report_type}")
 def api_generate_report(product_line: str, report_type: str):
+    # Keep the 8787 environment independent from Word-only reporting dependencies.
+    from .report_generator import generate_report
+
     try:
         path = generate_report(product_line, report_type)
     except ValueError as exc:

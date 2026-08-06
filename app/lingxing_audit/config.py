@@ -41,8 +41,12 @@ class AuditSettings:
                 "缺少 LINGXING_APP_ID 或 LINGXING_APP_SECRET，请检查项目根目录 .env。"
             )
         parsed = urlparse(base_url)
-        if parsed.scheme != "https" or not parsed.netloc:
+        if parsed.scheme != "https" or not parsed.hostname:
             raise AuditConfigurationError("LINGXING_BASE_URL 必须是有效的 HTTPS 地址。")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise AuditConfigurationError(
+                "LINGXING_BASE_URL 不得包含账号、密码、查询参数或片段。"
+            )
 
         lookback_days = _positive_int(read("LINGXING_AUDIT_LOOKBACK_DAYS", "7"), 7)
         timeout_seconds = _positive_int(read("LINGXING_AUDIT_TIMEOUT_SECONDS", "60"), 60)

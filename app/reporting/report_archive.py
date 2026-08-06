@@ -147,7 +147,7 @@ def resolve_report_artifact(report_id: int, db_path: Optional[Path] = None) -> P
     init_report_archive(database)
     with connection(database) as db:
         row = db.execute(
-            "SELECT artifact_path FROM report_runs WHERE id=?",
+            "SELECT artifact_path, artifact_sha256 FROM report_runs WHERE id=?",
             (int(report_id),),
         ).fetchone()
     if not row:
@@ -156,8 +156,12 @@ def resolve_report_artifact(report_id: int, db_path: Optional[Path] = None) -> P
     path = stored if stored.is_absolute() else ROOT / stored
     resolved = path.resolve()
     report_root = (ROOT / "data" / "reports").resolve()
-    if report_root not in resolved.parents or not resolved.exists():
+    if report_root not in resolved.parents or not resolved.is_file():
         raise ValueError("报告归档文件不存在或路径无效")
+    actual_digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    expected_digest = str(row["artifact_sha256"] or "").strip().lower()
+    if not expected_digest or actual_digest.lower() != expected_digest:
+        raise ValueError("报告归档文件校验失败，文件可能已被修改")
     return resolved
 
 
