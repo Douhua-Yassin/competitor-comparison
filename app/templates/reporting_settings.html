@@ -6,6 +6,7 @@
   <title>产品设置</title>
   <link rel="stylesheet" href="/static/reporting-dashboard.css">
   <link rel="stylesheet" href="/static/reporting-targets.css">
+  <link rel="stylesheet" href="/static/reporting-acceptance.css">
 </head>
 <body>
   <header class="topbar compact">
@@ -21,6 +22,26 @@
   </header>
 
   <main>
+    <section class="acceptance-card">
+      <div class="acceptance-header">
+        <div>
+          <h2>同步验收</h2>
+          <p>核对最近一次同步的负责产品、接口覆盖、产品线匹配和阻塞告警。空数据可能代表该周期确实没有订单、售后或广告活动。</p>
+        </div>
+        <div class="acceptance-actions">
+          <button id="acceptanceRefreshButton" type="button">刷新验收结果</button>
+          <a href="/api/reporting/acceptance/export?file_format=md">导出Markdown</a>
+          <a href="/api/reporting/acceptance/export?file_format=json">导出JSON</a>
+        </div>
+      </div>
+      <p id="acceptanceMessage" class="acceptance-message">正在读取最近一次同步验收结果……</p>
+      <div id="acceptanceIssues" class="acceptance-issues" hidden></div>
+      <div id="acceptanceSummary" class="acceptance-summary"></div>
+      <div id="acceptanceEndpoints" class="acceptance-endpoints"></div>
+      <div id="acceptanceProductLines" class="acceptance-lines"></div>
+      <p id="acceptanceGeneratedAt" class="acceptance-muted"></p>
+    </section>
+
     <section class="target-settings-card">
       <div>
         <h2>目标表</h2>
@@ -54,5 +75,6 @@
 
   <script src="/static/reporting-target-settings.js"></script>
   <script src="/static/reporting-settings.js"></script>
+  <script src="/static/reporting-acceptance.js"></script>
 </body>
 </html>
