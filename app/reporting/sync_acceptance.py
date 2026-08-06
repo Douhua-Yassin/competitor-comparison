@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ ENDPOINTS: tuple[dict[str, Any], ...] = (
         "code": "orders",
         "label": "销售订单",
         "metric_codes": ("sales_amount", "units", "order_count"),
-        "warning_terms": ("orders", "订单"),
+        "warning_terms": ("orders", "销售订单", "平台订单"),
     },
     {
         "code": "after_sales",
@@ -28,7 +29,7 @@ ENDPOINTS: tuple[dict[str, Any], ...] = (
         "code": "fba_inventory",
         "label": "FBA库存",
         "metric_codes": ("fba_available", "fba_inbound", "fba_reserved"),
-        "warning_terms": ("fba_inventory", "库存"),
+        "warning_terms": ("fba_inventory", "fba库存", "库存"),
     },
     {
         "code": "sp_product_report",
@@ -41,9 +42,15 @@ ENDPOINTS: tuple[dict[str, Any], ...] = (
             "ad_orders",
             "ad_units",
         ),
-        "warning_terms": ("sp_product_report", "广告"),
+        "warning_terms": ("sp_product_report", "sp商品广告", "广告"),
     },
 )
+
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)\b(app[_-]?secret|access[_-]?token|authorization|signature|sign)\b"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 def utc_now() -> str:
@@ -64,7 +71,7 @@ def build_sync_acceptance(
         ).fetchone()
         catalog_count = int(
             db.execute(
-                "SELECT COUNT(*) FROM lx_listings WHERE active=1"
+                "SELECT COUNT(*) FROM lx_listings WHERE active=1 AND deleted=0"
             ).fetchone()[0]
         )
         selected_rows = db.execute(
@@ -73,35 +80,22 @@ def build_sync_acceptance(
                    l.responsibility_level, s.store_name, s.country
             FROM lx_listings l
             JOIN lx_stores s ON s.sid=l.sid
-            WHERE l.active=1 AND l.responsibility_level IN ('normal','key')
+            WHERE l.active=1 AND l.deleted=0
+              AND l.responsibility_level IN ('normal','key')
+              AND l.product_line IS NOT NULL AND TRIM(l.product_line)<>''
             ORDER BY l.product_line, l.sid, l.msku
             """
         ).fetchall()
 
         if run is None:
-            return {
-                "state": "no_sync",
-                "generated_at": generated_at or utc_now(),
-                "message": "尚无领星同步记录。先同步Listing，设置负责产品后再次同步。",
-                "catalog": {
-                    "active_listings": catalog_count,
-                    "selected_listings": len(selected_rows),
-                    "key_listings": sum(
-                        1 for row in selected_rows if row["responsibility_level"] == "key"
-                    ),
-                    "normal_listings": sum(
-                        1 for row in selected_rows if row["responsibility_level"] == "normal"
-                    ),
-                },
-                "latest_run": None,
-                "endpoints": [],
-                "product_lines": [],
-                "blocking_issues": [],
-                "advisories": ["接口覆盖率表示有数据的Listing比例，不等同于销售或广告是否正常。"],
-            }
+            return _no_sync_payload(
+                catalog_count,
+                selected_rows,
+                generated_at or utc_now(),
+            )
 
         details = _json_object(run["details_json"])
-        warnings = [str(item) for item in details.get("warnings", []) if str(item).strip()]
+        warnings = _warning_list(details.get("warnings"))
         start = date.fromisoformat(run["window_start"])
         end = date.fromisoformat(run["window_end"])
         metrics = db.execute(
@@ -111,7 +105,9 @@ def build_sync_acceptance(
             WHERE metric_date BETWEEN ? AND ?
               AND listing_id IN (
                 SELECT id FROM lx_listings
-                WHERE active=1 AND responsibility_level IN ('normal','key')
+                WHERE active=1 AND deleted=0
+                  AND responsibility_level IN ('normal','key')
+                  AND product_line IS NOT NULL AND TRIM(product_line)<>''
               )
             ORDER BY metric_date, listing_id, source_endpoint, metric_code
             """,
@@ -140,8 +136,9 @@ def build_sync_acceptance(
     )
 
     blocking_issues: list[str] = []
+    message = _sanitize_text(run["message"] or "")
     if str(run["status"]) == "failed":
-        blocking_issues.append(str(run["message"] or "最近一次同步失败"))
+        blocking_issues.append(message or "最近一次同步失败")
     for warning in warnings:
         lowered = warning.lower()
         if any(term in lowered for term in ("403", "授权", "认证", "appsecret", "白名单")):
@@ -164,19 +161,8 @@ def build_sync_acceptance(
     return {
         "state": "ready",
         "generated_at": generated_at or utc_now(),
-        "message": str(run["message"] or ""),
-        "catalog": {
-            "active_listings": catalog_count,
-            "selected_listings": len(selected_rows),
-            "key_listings": sum(
-                1 for row in selected_rows if row["responsibility_level"] == "key"
-            ),
-            "normal_listings": sum(
-                1 for row in selected_rows if row["responsibility_level"] == "normal"
-            ),
-            "product_lines": len({row["product_line"] for row in selected_rows}),
-            "stores": len({int(row["sid"]) for row in selected_rows}),
-        },
+        "message": message,
+        "catalog": _catalog_summary(catalog_count, selected_rows),
         "latest_run": {
             "id": int(run["id"]),
             "status": str(run["status"]),
@@ -207,7 +193,7 @@ def write_acceptance_report(
     if normalized not in {"md", "json"}:
         raise ValueError("验收报告格式只支持 md 或 json")
     payload = build_sync_acceptance(db_path)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     directory = Path(output_dir or ACCEPTANCE_DIR) / stamp
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"acceptance-report.{normalized}"
@@ -219,6 +205,39 @@ def write_acceptance_report(
     else:
         path.write_text(_markdown(payload), encoding="utf-8")
     return path
+
+
+def _no_sync_payload(
+    catalog_count: int,
+    selected_rows: list[Any],
+    generated_at: str,
+) -> dict[str, Any]:
+    return {
+        "state": "no_sync",
+        "generated_at": generated_at,
+        "message": "尚无领星同步记录。先同步Listing，设置负责产品后再次同步。",
+        "catalog": _catalog_summary(catalog_count, selected_rows),
+        "latest_run": None,
+        "endpoints": [],
+        "product_lines": [],
+        "blocking_issues": [],
+        "advisories": ["接口覆盖率表示有数据的Listing比例，不等同于销售或广告是否正常。"],
+    }
+
+
+def _catalog_summary(catalog_count: int, selected_rows: list[Any]) -> dict[str, int]:
+    return {
+        "active_listings": catalog_count,
+        "selected_listings": len(selected_rows),
+        "key_listings": sum(
+            1 for row in selected_rows if row["responsibility_level"] == "key"
+        ),
+        "normal_listings": sum(
+            1 for row in selected_rows if row["responsibility_level"] == "normal"
+        ),
+        "product_lines": len({str(row["product_line"]) for row in selected_rows}),
+        "stores": len({int(row["sid"]) for row in selected_rows}),
+    }
 
 
 def _endpoint_acceptance(
@@ -274,7 +293,7 @@ def _product_line_acceptance(
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[Any]] = defaultdict(list)
     for row in selected_rows:
-        grouped[str(row["product_line"] or "未命名产品线")].append(row)
+        grouped[str(row["product_line"])].append(row)
 
     result: list[dict[str, Any]] = []
     for product_line, listings in sorted(grouped.items()):
@@ -322,9 +341,25 @@ def _json_object(value: Any) -> dict[str, Any]:
         return value
     try:
         parsed = json.loads(str(value or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _warning_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return _deduplicate([_sanitize_text(item) for item in items])
+
+
+def _sanitize_text(value: Any) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    text = _SENSITIVE_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}***redacted***",
+        text,
+    )
+    return _BEARER_TOKEN.sub("Bearer ***redacted***", text)
 
 
 def _deduplicate(values: list[str]) -> list[str]:
