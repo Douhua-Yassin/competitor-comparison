@@ -37,6 +37,17 @@ def targets_for_period(
                 (product_line, period_type, start, end),
             )
         ]
+    if products is None or metric_rows is None:
+        loaded_products, loaded_metrics = _load_scope_data(
+            database,
+            product_line,
+            start,
+            end,
+        )
+        if products is None:
+            products = loaded_products
+        if metric_rows is None:
+            metric_rows = loaded_metrics
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -66,6 +77,46 @@ def targets_for_period(
             scope_note = _scope_note(row, matched)
             result.append(_payload(row, metric_code, actual, scope_note))
     return result
+
+
+def _load_scope_data(
+    database: Path,
+    product_line: str,
+    start: str,
+    end: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    with connection(database) as db:
+        products = [
+            dict(row)
+            for row in db.execute(
+                """
+                SELECT id, sid, asin, msku, product_name
+                FROM lx_listings
+                WHERE active=1 AND deleted=0 AND responsibility_level='key'
+                  AND product_line=?
+                ORDER BY id
+                """,
+                (product_line,),
+            )
+        ]
+        listing_ids = [int(row["id"]) for row in products]
+        metrics: list[dict[str, Any]] = []
+        if listing_ids:
+            placeholders = ",".join("?" for _ in listing_ids)
+            metrics = [
+                dict(row)
+                for row in db.execute(
+                    f"""
+                    SELECT metric_date, listing_id, metric_code, metric_value
+                    FROM lx_daily_metrics
+                    WHERE listing_id IN ({placeholders})
+                      AND metric_date>=? AND metric_date<=?
+                    ORDER BY metric_date, listing_id, metric_code
+                    """,
+                    listing_ids + [start, end],
+                )
+            ]
+    return products, metrics
 
 
 def _payload(
