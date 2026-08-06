@@ -105,7 +105,9 @@ def main() -> None:
         )
     finally:
         analysis_engine.deepseek_settings = original_settings
-    print(output)
+    if not output.exists():
+        raise RuntimeError("sample report was not created")
+    print("REPORT_SAMPLE_CREATED")
 
 
 if __name__ == "__main__":
