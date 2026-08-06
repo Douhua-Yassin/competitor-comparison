@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import tempfile
 from datetime import date, datetime
@@ -54,7 +55,7 @@ def generate_report(
 
     target_dir = Path(output_dir or REPORT_DIR / current.isoformat())
     target_dir.mkdir(parents=True, exist_ok=True)
-    safe_line = re.sub(r'[\\/:*?"<>|]+', "_", product_line).strip() or "产品线"
+    safe_line = _safe_filename_component(product_line)
     stamp = datetime.now().strftime("%H%M%S-%f")
     path = target_dir / f"{safe_line}-{selected['start']}-{selected['end']}-{REPORT_LABEL[report_type]}-{stamp}.docx"
 
@@ -155,21 +156,34 @@ def generate_report(
         cells[4].text = str(product.get("country") or "-")
 
     document.save(path)
-    archive_report(
-        product_line=product_line,
-        report_type=report_type,
-        period_start=selected["start"],
-        period_end=selected["end"],
-        analysis_source=analysis_result.source,
-        analysis_warning=analysis_result.warning,
-        data_snapshot={"module": module, "selected": selected},
-        target_snapshot=selected.get("targets") or [],
-        note_snapshot=note_snapshot,
-        analysis=analysis,
-        artifact_path=path,
-        db_path=database,
-    )
+    try:
+        archive_report(
+            product_line=product_line,
+            report_type=report_type,
+            period_start=selected["start"],
+            period_end=selected["end"],
+            analysis_source=analysis_result.source,
+            analysis_warning=analysis_result.warning,
+            data_snapshot={"module": module, "selected": selected},
+            target_snapshot=selected.get("targets") or [],
+            note_snapshot=note_snapshot,
+            analysis=analysis,
+            artifact_path=path,
+            db_path=database,
+        )
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     return path
+
+
+def _safe_filename_component(value: str, max_length: int = 80) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", value).strip(" .") or "产品线"
+    if len(cleaned) <= max_length:
+        return cleaned
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+    prefix = cleaned[: max_length - len(digest) - 1].rstrip(" ._") or "产品线"
+    return f"{prefix}-{digest}"
 
 
 def _add_summary_table(document: Document, window: dict[str, Any]) -> None:

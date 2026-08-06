@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Iterable, Optional
 
-from app.lingxing_audit.config import AuditSettings
+from app.lingxing_audit.config import AuditSettings, DEFAULT_BASE_URL
 from app.lingxing_audit.serializer import extract_records, to_plain
 
 from .dashboard_db import (
@@ -34,6 +35,7 @@ class SyncResult:
 
 
 _SYNC_LOCK = asyncio.Lock()
+_SYNC_START_LOCK = threading.Lock()
 _SYNC_STATUS: dict[str, Any] = {
     "running": False,
     "message": "尚未同步",
@@ -47,7 +49,34 @@ _SYNC_STATUS: dict[str, Any] = {
 
 
 def sync_status() -> dict[str, Any]:
-    return dict(_SYNC_STATUS)
+    result = dict(_SYNC_STATUS)
+    result["warnings"] = list(_SYNC_STATUS.get("warnings") or [])
+    return result
+
+
+def reserve_sync_start() -> bool:
+    """Atomically reserve a background sync before its task starts running."""
+    with _SYNC_START_LOCK:
+        if _SYNC_STATUS.get("running") or _SYNC_LOCK.locked():
+            return False
+        _SYNC_STATUS.update(
+            running=True,
+            message="领星数据同步已排队",
+            started_at=datetime.now().isoformat(timespec="seconds"),
+            finished_at=None,
+            warnings=[],
+        )
+        return True
+
+
+def cancel_sync_reservation(message: str = "领星数据同步启动失败") -> None:
+    with _SYNC_START_LOCK:
+        if not _SYNC_LOCK.locked():
+            _SYNC_STATUS.update(
+                running=False,
+                message=message,
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
 
 
 async def run_recent_sync(
@@ -57,13 +86,15 @@ async def run_recent_sync(
     if _SYNC_LOCK.locked():
         raise RuntimeError("领星数据同步正在运行")
     async with _SYNC_LOCK:
-        cfg = settings or AuditSettings.load()
-        today = date.today()
-        window_start = today - timedelta(days=SYNC_DAYS - 1)
-        run_id = create_sync_run(window_start.isoformat(), today.isoformat())
+        run_id: Optional[int] = None
+        catalog_count = 0
+        selected_count = 0
+        metric_count = 0
+        finalized_count = 0
+        warnings: list[str] = []
         _SYNC_STATUS.update(
             running=True,
-            message="正在刷新领星店铺和 Listing",
+            message="正在读取领星配置",
             started_at=datetime.now().isoformat(timespec="seconds"),
             finished_at=None,
             catalog_count=0,
@@ -71,11 +102,17 @@ async def run_recent_sync(
             metric_count=0,
             warnings=[],
         )
-        catalog_count = 0
-        selected_count = 0
-        metric_count = 0
-        warnings: list[str] = []
         try:
+            cfg = settings or AuditSettings.load()
+            today = date.today()
+            window_start = today - timedelta(days=SYNC_DAYS - 1)
+            run_id = create_sync_run(window_start.isoformat(), today.isoformat())
+            _SYNC_STATUS["message"] = "正在刷新领星店铺和 Listing"
+            if cfg.base_url != DEFAULT_BASE_URL:
+                warnings.append(
+                    "当前SDK固定使用官方OpenAPI地址；自定义LINGXING_BASE_URL未传入SDK。"
+                )
+
             factory = api_factory or _default_api_factory
             api = factory(
                 app_id=cfg.app_id,
@@ -172,15 +209,16 @@ async def run_recent_sync(
                 f"同步完成：Listing {catalog_count}，负责产品 {selected_count}，"
                 f"更新指标 {metric_count}，冻结历史 {finalized_count}"
             )
-            finish_sync_run(
-                run_id,
-                status,
-                catalog_count,
-                selected_count,
-                metric_count,
-                message,
-                {"warnings": warnings, "finalized_count": finalized_count},
-            )
+            if run_id is not None:
+                finish_sync_run(
+                    run_id,
+                    status,
+                    catalog_count,
+                    selected_count,
+                    metric_count,
+                    message,
+                    {"warnings": warnings, "finalized_count": finalized_count},
+                )
             result = SyncResult(
                 catalog_count=catalog_count,
                 selected_count=selected_count,
@@ -193,26 +231,27 @@ async def run_recent_sync(
                 message=message,
                 finished_at=datetime.now().isoformat(timespec="seconds"),
                 metric_count=metric_count,
-                warnings=warnings,
+                warnings=list(warnings),
             )
             return result
         except Exception as exc:
             message = "领星同步失败：" + _safe_error(exc)
-            finish_sync_run(
-                run_id,
-                "failed",
-                catalog_count,
-                selected_count,
-                metric_count,
-                message,
-                {"warnings": warnings},
-            )
+            if run_id is not None:
+                finish_sync_run(
+                    run_id,
+                    "failed",
+                    catalog_count,
+                    selected_count,
+                    metric_count,
+                    message,
+                    {"warnings": warnings},
+                )
             _SYNC_STATUS.update(
                 running=False,
                 message=message,
                 finished_at=datetime.now().isoformat(timespec="seconds"),
                 metric_count=metric_count,
-                warnings=warnings,
+                warnings=list(warnings),
             )
             raise
 

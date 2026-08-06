@@ -15,7 +15,12 @@ from app.lingxing_audit.config import AuditSettings
 from .dashboard_db import DB_PATH, connection, list_settings_products, save_note, update_listing_scope
 from .dashboard_models import ListingScopeUpdate, NoteSave
 from .dashboard_service import dashboard
-from .lingxing_sync import run_recent_sync, sync_status
+from .lingxing_sync import (
+    cancel_sync_reservation,
+    reserve_sync_start,
+    run_recent_sync,
+    sync_status,
+)
 from .report_archive import list_report_runs, resolve_report_artifact
 from .report_generator import generate_report
 from .targets import import_targets, target_status, write_target_template
@@ -154,8 +159,7 @@ def api_update_product_scope(payload: ListingScopeUpdate):
 
 @router.post("/api/reporting/sync")
 async def api_start_sync():
-    state = sync_status()
-    if state["running"]:
+    if not reserve_sync_start():
         raise HTTPException(status_code=409, detail="领星数据同步正在运行")
 
     async def worker() -> None:
@@ -165,7 +169,11 @@ async def api_start_sync():
             # Detailed sanitized error is retained in sync_status and lx_sync_runs.
             pass
 
-    asyncio.create_task(worker())
+    try:
+        asyncio.create_task(worker())
+    except Exception:
+        cancel_sync_reservation()
+        raise
     return {"started": True, "window_days": 14}
 
 

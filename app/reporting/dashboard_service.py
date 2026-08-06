@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .dashboard_db import DB_PATH, connection, init_dashboard_db, last_sync, load_notes
-from .targets import targets_for_period
+from .target_evaluation import targets_for_period
 
 WINDOWS: tuple[tuple[str, str, int | None], ...] = (
     ("day", "当日", 1),
@@ -41,7 +41,8 @@ def dashboard(db_path: Optional[Path] = None, today: Optional[date] = None) -> d
     init_dashboard_db(path)
     current = today or date.today()
     month_start = current.replace(day=1)
-    history_start = min(month_start, current - timedelta(days=27))
+    month_prior_start = month_start - timedelta(days=current.day)
+    history_start = min(month_prior_start, current - timedelta(days=27))
     keys = period_keys(current)
     rows, metrics, snapshots = _load_product_data(path, history_start, product_line=None)
 
@@ -280,7 +281,7 @@ def _window_payload_for_range(
     summary = _aggregate(current_rows)
     prior = _aggregate(prior_rows)
     source_note = None
-    if not summary.get("sales_amount") and fallback_code in {"day", "7d", "14d"}:
+    if summary.get("sales_amount") is None and fallback_code in {"day", "7d", "14d"}:
         fallback = _listing_rollup(fallback_code, products, snapshots)
         if fallback:
             summary.update({key: value for key, value in fallback.items() if value is not None})
@@ -328,25 +329,68 @@ def _window_payload_for_range(
 
 
 def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Optional[float]]:
-    grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    grouped: dict[str, list[tuple[str, int, float]]] = defaultdict(list)
     for row in rows:
-        grouped[str(row["metric_code"])].append((str(row["metric_date"]), float(row["metric_value"])))
+        grouped[str(row["metric_code"])].append(
+            (
+                str(row["metric_date"]),
+                int(row.get("listing_id") or 0),
+                float(row["metric_value"]),
+            )
+        )
+
     result: dict[str, Optional[float]] = {}
     for code in SUM_CODES:
         values = grouped.get(code, [])
-        result[code] = sum(value for _, value in values) if values else None
+        result[code] = sum(value for _, _, value in values) if values else None
+
+    # Inventory is a point-in-time metric. Use the latest value for every
+    # listing, then sum those latest values for the product line. Selecting a
+    # single row from the latest date undercounts lines with multiple listings.
     for code in LATEST_CODES:
-        values = grouped.get(code, [])
-        result[code] = max(values, key=lambda item: item[0])[1] if values else None
+        latest_by_listing: dict[int, tuple[str, float]] = {}
+        for metric_date, listing_id, value in grouped.get(code, []):
+            previous = latest_by_listing.get(listing_id)
+            if previous is None or metric_date > previous[0]:
+                latest_by_listing[listing_id] = (metric_date, value)
+        result[code] = (
+            sum(value for _, value in latest_by_listing.values())
+            if latest_by_listing
+            else None
+        )
+
+    # Prefer ratios derived from their additive components. Arithmetic means
+    # of per-listing or per-day CTR/CPC/CVR/ACOS/ROAS distort the totals. Raw
+    # ratio values remain a fallback when the source components are absent.
+    result["ctr"] = _ratio(result.get("clicks"), result.get("impressions"))
+    result["cpc"] = _ratio(result.get("ad_spend"), result.get("clicks"))
+    result["cvr"] = _ratio(result.get("ad_orders"), result.get("clicks"))
+    result["acos"] = _ratio(result.get("ad_spend"), result.get("ad_sales"))
+    result["roas"] = _ratio(result.get("ad_sales"), result.get("ad_spend"))
     for code in RATIO_CODES:
+        if result.get(code) is not None:
+            continue
         values = grouped.get(code, [])
-        result[code] = sum(value for _, value in values) / len(values) if values else None
+        result[code] = (
+            sum(value for _, _, value in values) / len(values) if values else None
+        )
+
     sales = result.get("sales_amount")
     spend = result.get("ad_spend")
-    result["tacos"] = spend / sales if sales not in (None, 0) and spend is not None else None
+    result["tacos"] = _ratio(spend, sales)
     profit = result.get("profit")
-    result["profit_margin"] = profit / sales if sales not in (None, 0) and profit is not None else result.get("profit_margin")
+    result["profit_margin"] = (
+        _ratio(profit, sales)
+        if profit is not None
+        else result.get("profit_margin")
+    )
     return result
+
+
+def _ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator in (None, 0):
+        return None
+    return numerator / denominator
 
 
 def _series(rows: list[dict[str, Any]], start: date, end: date) -> dict[str, Any]:

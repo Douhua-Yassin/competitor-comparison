@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -23,7 +24,6 @@ METRIC_COLUMNS: dict[str, tuple[str, str, str, str]] = {
     "广告花费目标": ("ad_spend", "currency", "budget", "广告花费"),
     "FBA可售库存目标": ("fba_available", "count", "neutral", "FBA可售库存"),
 }
-ADDITIVE_METRICS = {"sales_amount", "units", "profit", "ad_spend", "fba_available"}
 PERIOD_ALIASES = {
     "日": "day",
     "日报": "day",
@@ -140,7 +140,10 @@ def write_target_template(path: Optional[Path] = None) -> Path:
     }
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
-    workbook.save(output)
+    try:
+        workbook.save(output)
+    finally:
+        workbook.close()
     return output
 
 
@@ -170,12 +173,15 @@ def import_targets(
                 "imported_at": duplicate["imported_at"],
             }
 
-    workbook = load_workbook(path, data_only=True)
-    sheet = workbook["目标"] if "目标" in workbook.sheetnames else next(
-        (workbook[name] for name in workbook.sheetnames if name != "填写说明"),
-        workbook.active,
-    )
-    rows = list(sheet.iter_rows(values_only=True))
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    try:
+        sheet = workbook["目标"] if "目标" in workbook.sheetnames else next(
+            (workbook[name] for name in workbook.sheetnames if name != "填写说明"),
+            workbook.active,
+        )
+        rows = list(sheet.iter_rows(values_only=True))
+    finally:
+        workbook.close()
     if not rows:
         raise ValueError("目标表没有内容")
     header = [_normalize_header(value) for value in rows[0]]
@@ -367,81 +373,24 @@ def targets_for_period(
     end: str,
     summary: dict[str, Any],
     db_path: Optional[Path] = None,
+    *,
+    products: Optional[list[dict[str, Any]]] = None,
+    metric_rows: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    database = Path(db_path or DB_PATH)
-    init_targets_db(database)
-    with connection(database) as db:
-        rows = [
-            dict(row)
-            for row in db.execute(
-                """
-                SELECT * FROM report_targets
-                WHERE active=1 AND product_line=? AND period_type=?
-                  AND period_start<=? AND period_end>=?
-                ORDER BY metric_code, scope_type, id
-                """,
-                (product_line, period_type, start, end),
-            )
-        ]
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(str(row["metric_code"]), []).append(row)
+    """Backward-compatible entry point for listing-aware target evaluation."""
+    from .target_evaluation import targets_for_period as evaluate_targets
 
-    result: list[dict[str, Any]] = []
-    for code, candidates in grouped.items():
-        direct = [row for row in candidates if row["scope_type"] == "product_line"]
-        chosen = direct[-1:] if direct else candidates
-        if direct:
-            target_value = float(direct[-1]["target_value"])
-            scope_note = "产品线目标"
-            unit = str(direct[-1]["unit"])
-            direction = str(direct[-1]["direction"])
-            note = direct[-1].get("note")
-        elif code in ADDITIVE_METRICS:
-            target_value = sum(float(row["target_value"]) for row in chosen)
-            scope_note = f"{len(chosen)}个单品目标汇总"
-            unit = str(chosen[0]["unit"])
-            direction = str(chosen[0]["direction"])
-            note = None
-        else:
-            continue
-        actual = summary.get(code)
-        completion = None
-        if actual is not None and target_value != 0:
-            completion = float(actual) / target_value
-        status = _target_state(actual, target_value, direction)
-        label = next(
-            (meta[3] for meta in METRIC_COLUMNS.values() if meta[0] == code),
-            code,
-        )
-        result.append(
-            {
-                "metric_code": code,
-                "label": label,
-                "target": target_value,
-                "actual": actual,
-                "completion": completion,
-                "unit": unit,
-                "direction": direction,
-                "status": status,
-                "scope_note": scope_note,
-                "note": note,
-            }
-        )
-    return result
+    return evaluate_targets(
+        product_line,
+        period_type,
+        start,
+        end,
+        summary,
+        db_path,
+        products=products,
+        metric_rows=metric_rows,
+    )
 
-
-def _target_state(actual: Any, target: float, direction: str) -> str:
-    if actual is None:
-        return "missing"
-    value = float(actual)
-    if direction == "higher":
-        return "achieved" if value >= target else "in_progress"
-    if direction == "lower":
-        return "achieved" if value <= target else "exceeded"
-    if direction == "budget":
-        return "within_budget" if value <= target else "over_budget"
-    return "reference"
 
 
 def _parse_period(period_type_value: Any, period_value: Any) -> tuple[str, str, str, str]:
@@ -537,6 +486,8 @@ def _number(value: Any, *, ratio: bool = False) -> float:
             number = float(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"无法识别数值：{value}") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"目标值必须是有限数字：{value}")
     if ratio and abs(number) > 1:
         return number / 100
     return number

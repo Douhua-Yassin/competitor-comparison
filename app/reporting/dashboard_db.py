@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -20,14 +21,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
+@contextmanager
+def connection(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     path = Path(db_path or DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, timeout=DB_TIMEOUT_SECONDS)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout={DB_TIMEOUT_SECONDS * 1000}")
     db.execute("PRAGMA foreign_keys=ON")
-    return db
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def init_dashboard_db(db_path: Optional[Path] = None) -> None:
