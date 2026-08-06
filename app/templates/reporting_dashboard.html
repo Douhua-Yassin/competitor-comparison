@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>经营报告</title>
+  <link rel="stylesheet" href="/static/reporting-dashboard.css">
+  <link rel="stylesheet" href="/static/reporting-targets.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">LINGXING REPORTING</p>
+      <h1>经营报告</h1>
+      <p id="syncSummary" class="subtitle">正在读取领星数据……</p>
+    </div>
+    <div class="top-actions">
+      <button id="syncButton" type="button">同步最新数据</button>
+      <a class="settings-button" href="/reporting/settings" aria-label="打开设置">⚙ 设置</a>
+    </div>
+  </header>
+
+  <main>
+    <section id="syncStatus" class="status-strip">正在加载</section>
+    <section id="dashboard" class="dashboard-list">
+      <div class="empty-state">正在加载重点产品线……</div>
+    </section>
+  </main>
+
+  <dialog id="messageDialog">
+    <form method="dialog">
+      <h3 id="dialogTitle">提示</h3>
+      <div id="dialogBody"></div>
+      <button>关闭</button>
+    </form>
+  </dialog>
+
+  <noscript>
+    <div class="empty-state">浏览器已禁用 JavaScript，经营报告无法加载。</div>
+  </noscript>
+  <script src="/static/reporting-runtime-guard.js"></script>
+  <script src="/static/reporting-dashboard.js"></script>
+  <script src="/static/reporting-targets.js"></script>
+</body>
+</html>

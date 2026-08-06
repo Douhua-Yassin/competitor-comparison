@@ -1,7 +1,17 @@
 node_modules/
 .venv/
+.venv-lingxing/
 .pytest_cache/
 __pycache__/
+
+.env
+.env.*
+!.env.example
+
+data/
+*.db
+*.log
+*.pid
 
 flatten-code.cjs
 *.json

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>产品设置</title>
+  <link rel="stylesheet" href="/static/reporting-dashboard.css">
+  <link rel="stylesheet" href="/static/reporting-targets.css">
+  <link rel="stylesheet" href="/static/reporting-acceptance.css">
+</head>
+<body>
+  <header class="topbar compact">
+    <div>
+      <p class="eyebrow">PRODUCT SETTINGS</p>
+      <h1>产品设置</h1>
+      <p class="subtitle">产品目录来自领星。只有标记为重点或普通的产品才会同步经营数据。</p>
+    </div>
+    <div class="top-actions">
+      <button id="syncButton" type="button">同步最新数据</button>
+      <a class="settings-button" href="/reporting">返回主页面</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="acceptance-card">
+      <div class="acceptance-header">
+        <div>
+          <h2>同步验收</h2>
+          <p>核对最近一次同步的负责产品、接口覆盖、产品线匹配和阻塞告警。空数据可能代表该周期确实没有订单、售后或广告活动。</p>
+        </div>
+        <div class="acceptance-actions">
+          <button id="acceptanceRefreshButton" type="button">刷新验收结果</button>
+          <a href="/api/reporting/acceptance/export?file_format=md">导出Markdown</a>
+          <a href="/api/reporting/acceptance/export?file_format=json">导出JSON</a>
+        </div>
+      </div>
+      <p id="acceptanceMessage" class="acceptance-message">正在读取最近一次同步验收结果……</p>
+      <div id="acceptanceIssues" class="acceptance-issues" hidden></div>
+      <div id="acceptanceSummary" class="acceptance-summary"></div>
+      <div id="acceptanceEndpoints" class="acceptance-endpoints"></div>
+      <div id="acceptanceProductLines" class="acceptance-lines"></div>
+      <p id="acceptanceGeneratedAt" class="acceptance-muted"></p>
+    </section>
+
+    <section class="target-settings-card">
+      <div>
+        <h2>目标表</h2>
+        <p>目标不在网页填写。编辑项目根目录的“目标表.xlsx”，然后在这里重新读取。</p>
+      </div>
+      <div class="target-settings-actions">
+        <a href="/api/reporting/targets/template">下载目标表模板</a>
+        <button id="targetImportButton" type="button">读取目标表.xlsx</button>
+      </div>
+      <div id="targetImportStatus" class="target-import-status">正在读取目标状态……</div>
+    </section>
+
+    <section class="filter-bar">
+      <label>国家<select id="countryFilter"><option value="">全部国家</option></select></label>
+      <label>店铺<select id="storeFilter"><option value="">全部店铺</option></select></label>
+      <label class="search-label">产品搜索<input id="productSearch" type="search" placeholder="名称、ASIN、MSKU、LSKU"></label>
+      <span id="settingsStatus">正在加载领星 Listing……</span>
+    </section>
+    <section id="settingsProducts" class="settings-groups">
+      <div class="empty-state">正在加载产品目录……</div>
+    </section>
+  </main>
+
+  <dialog id="messageDialog">
+    <form method="dialog">
+      <h3 id="dialogTitle">提示</h3>
+      <div id="dialogBody"></div>
+      <button>关闭</button>
+    </form>
+  </dialog>
+
+  <script src="/static/reporting-target-settings.js"></script>
+  <script src="/static/reporting-settings.js"></script>
+  <script src="/static/reporting-acceptance.js"></script>
+</body>
+</html>

@@ -1,0 +1,243 @@
+name: Windows Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Parse PowerShell scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $files = @(Get-ChildItem scripts -Filter *.ps1) + @(Get-Item 'lingxing_audit.ps1')
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              throw "$($file.Name) has PowerShell syntax errors"
+            }
+          }
+
+      - name: Run actual first-install script
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          $env:CI = '1'
+          cmd.exe /d /c "首次安装.bat"
+          if ($LASTEXITCODE -ne 0) { throw "首次安装.bat 失败：$LASTEXITCODE" }
+          $py = '.\.venv\Scripts\python.exe'
+          & $py -m pip install ruff
+          & $py -m pip check
+          & $py -c "import sys, importlib.metadata as m; print(sys.version); print('Playwright=' + m.version('playwright'))"
+
+      - name: Dedicated Lingxing Python 3.11 environment smoke test
+        if: matrix.python-version == '3.11'
+        shell: powershell
+        run: |
+          $env:CI = '1'
+          $env:LINGXING_PYTHON = (Get-Command python.exe).Source
+          $env:LINGXING_AUDIT_SETUP_ONLY = '1'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lingxing_audit.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Lingxing environment setup failed: $LASTEXITCODE" }
+          $lingxingPython = '.\.venv-lingxing\Scripts\python.exe'
+          if (-not (Test-Path $lingxingPython)) { throw 'Missing .venv-lingxing' }
+          & $lingxingPython -c "import sys; assert sys.version_info[:2] == (3, 11); import dotenv, lingxingapi_httpx, fastapi, uvicorn, jinja2, httpx, docx; import importlib.metadata as m; assert m.version('lingxingapi-httpx') == '0.1.5'; print(sys.version); print('Lingxing=' + m.version('lingxingapi-httpx'))"
+          if ($LASTEXITCODE -ne 0) { throw 'Lingxing environment dependency check failed' }
+          & $lingxingPython -m pip install --disable-pip-version-check --no-cache-dir pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Lingxing test dependency setup failed' }
+          & $lingxingPython -m pytest -q tests/test_reporting_word.py tests/test_reporting_runtime.py
+          if ($LASTEXITCODE -ne 0) { throw 'Reporting document or runtime test failed' }
+
+      - name: Python compile check
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m compileall -q app tests
+
+      - name: Pytest
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m pytest -q
+
+      - name: Fatal Python lint checks
+        shell: pwsh
+        run: .\.venv\Scripts\ruff.exe check app tests --select E9,F63,F7,F82
+
+      - name: JavaScript syntax check
+        shell: pwsh
+        run: |
+          node --check app/static/app.js
+          node --check app/static/reporting-dashboard.js
+          node --check app/static/reporting-settings.js
+          node --check app/static/reporting-runtime-guard.js
+
+      - name: Launcher wrapper checks
+        shell: pwsh
+        run: |
+          $mapping = @{
+            '首次安装.bat' = 'scripts\first_install.ps1'
+            '启动插件浏览器.bat' = 'scripts\start_plugin_browser.ps1'
+            '启动程序.bat' = 'scripts\start_server.ps1'
+            '停止程序.bat' = 'scripts\stop_server.ps1'
+            '故障检查.bat' = 'scripts\diagnose.ps1'
+            '领星接口盘点.bat' = 'lingxing_audit.ps1'
+            '启动报告程序.bat' = 'scripts\start_reporting.ps1'
+            '停止报告程序.bat' = 'scripts\stop_reporting.ps1'
+          }
+          foreach ($entry in $mapping.GetEnumerator()) {
+            if (-not (Test-Path $entry.Key)) { throw "缺少文件：$($entry.Key)" }
+            if (-not (Test-Path $entry.Value)) { throw "缺少文件：$($entry.Value)" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $entry.Key))
+            if ($bytes | Where-Object { $_ -gt 127 }) {
+              throw "$($entry.Key) 必须保持纯 ASCII，避免 cmd.exe 误解析中文"
+            }
+            $text = Get-Content -Raw -Encoding ASCII $entry.Key
+            if ($text -notmatch [regex]::Escape($entry.Value)) {
+              throw "$($entry.Key) 没有调用 $($entry.Value)"
+            }
+          }
+
+          $openReporting = Get-Content -Raw -Encoding UTF8 'scripts\open_reporting.ps1'
+          foreach ($required in @('--no-proxy-server', '--disable-extensions', 'reporting-browser-profile', '--app=')) {
+            if ($openReporting -notmatch [regex]::Escape($required)) {
+              throw "Isolated reporting browser is missing: $required"
+            }
+          }
+          $startReporting = Get-Content -Raw -Encoding UTF8 'scripts\start_reporting.ps1'
+          foreach ($required in @('NO_PROXY', '127.0.0.1', 'localhost', 'open_reporting.ps1')) {
+            if ($startReporting -notmatch [regex]::Escape($required)) {
+              throw "Reporting launcher loopback bypass is missing: $required"
+            }
+          }
+
+          $requirements = Get-Content -Raw -Encoding UTF8 'requirements.txt'
+          if ($requirements -notmatch 'playwright>=1\.48,<1\.49') {
+            throw 'Playwright 未锁定到 1.48 系列'
+          }
+          $lingxingRequirements = Get-Content -Raw -Encoding UTF8 'requirements-lingxing.txt'
+          if ($lingxingRequirements -notmatch 'lingxingapi-httpx==0\.1\.5') {
+            throw '领星 SDK 版本未锁定'
+          }
+          foreach ($required in @('python-dotenv', 'fastapi', 'uvicorn', 'jinja2', 'httpx', 'python-docx')) {
+            if ($lingxingRequirements -notmatch [regex]::Escape($required)) {
+              throw "领星报告环境缺少依赖：$required"
+            }
+          }
+          $gitignore = Get-Content -Raw -Encoding UTF8 '.gitignore'
+          if ($gitignore -notmatch '(?m)^\.env\r?$') {
+            throw '.env 未加入 Git 忽略规则'
+          }
+          if ($gitignore -notmatch '(?m)^\.venv-lingxing/\r?$') {
+            throw '.venv-lingxing 未加入 Git 忽略规则'
+          }
+
+      - name: Create test workbook
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -c "from openpyxl import Workbook; w=Workbook(); s=w.active; s.title='测试产品线'; s.append(['品牌','尺寸','ASIN','星级（评价）','售价','是否我方']); s.append(['TEST','13','B0D3D2W989',None,100,'是']); w.save('产品输入表.xlsx')"
+
+      - name: Real start and stop launcher smoke test
+        shell: pwsh
+        run: |
+          $env:CI = '1'
+          cmd.exe /d /c "启动程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw "启动程序.bat 失败：$LASTEXITCODE" }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8787/api/status *> $null
+          if ($LASTEXITCODE -ne 0) { throw '启动脚本结束后 8787 不可用' }
+          cmd.exe /d /c "停止程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw "停止程序.bat 失败：$LASTEXITCODE" }
+          Start-Sleep -Seconds 2
+          curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/status *> $null
+          if ($LASTEXITCODE -eq 0) { throw '停止脚本结束后 8787 仍在监听' }
+          exit 0
+
+      - name: Real Lingxing-first reporting service smoke test
+        if: matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $env:CI = '1'
+          cmd.exe /d /c "启动报告程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw "启动报告程序.bat 失败：$LASTEXITCODE" }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/status *> $null
+          if ($LASTEXITCODE -ne 0) { throw '报告服务启动后 8790 不可用' }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/dashboard *> $null
+          if ($LASTEXITCODE -ne 0) { throw '经营看板 API 不可用' }
+          curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/products *> $null
+          if ($LASTEXITCODE -ne 0) { throw '领星产品设置 API 不可用' }
+          $diagnostics = curl.exe --silent --fail --noproxy "*" --max-time 5 http://127.0.0.1:8790/api/reporting/diagnostics
+          if ($LASTEXITCODE -ne 0) { throw 'Reporting diagnostics API is unavailable' }
+          if ($diagnostics -match 'APP-SECRET|LINGXING_APP_SECRET') { throw 'Diagnostics leaked credential material' }
+          $headers = curl.exe --silent --show-error --noproxy "*" --max-time 5 --dump-header - --output NUL http://127.0.0.1:8790/reporting
+          if (($headers -join "`n") -notmatch '(?i)cache-control:\s*no-store') {
+            throw 'Reporting page does not disable cache'
+          }
+          cmd.exe /d /c "停止报告程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw "停止报告程序.bat 失败：$LASTEXITCODE" }
+          Start-Sleep -Seconds 2
+          curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8790/api/status *> $null
+          if ($LASTEXITCODE -eq 0) { throw '报告服务停止后 8790 仍在监听' }
+          exit 0
+
+      - name: Stop legacy system-Python server
+        if: matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $legacy = Start-Process -FilePath python -ArgumentList '-m uvicorn app.main:app --host 127.0.0.1 --port 8787' -WorkingDirectory $PWD -WindowStyle Hidden -PassThru
+          for ($i = 0; $i -lt 30; $i++) {
+            curl.exe --silent --fail --noproxy "*" --max-time 2 http://127.0.0.1:8787/api/status *> $null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 1
+          }
+          $env:CI = '1'
+          cmd.exe /d /c "停止程序.bat"
+          if ($LASTEXITCODE -ne 0) { throw '停止程序未能关闭旧式系统 Python 服务' }
+          Start-Sleep -Seconds 2
+          if (Get-Process -Id $legacy.Id -ErrorAction SilentlyContinue) {
+            throw '旧式服务进程仍然存在'
+          }
+
+      - name: Real Chrome CDP connection smoke test
+        if: matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+          )
+          $chrome = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chrome) { throw 'CI 环境未找到 Chrome' }
+
+          $env:CI = '1'
+          $env:APP_CHROME_PATH = $chrome
+          $env:APP_CHROME_USER_DATA_DIR = Join-Path $env:RUNNER_TEMP "competitor-cdp-$env:GITHUB_RUN_ID"
+          cmd.exe /d /c "启动插件浏览器.bat"
+          if ($LASTEXITCODE -ne 0) { throw "启动插件浏览器.bat 失败：$LASTEXITCODE" }
+
+          .\.venv\Scripts\python.exe -m app.cdp_probe
+          if ($LASTEXITCODE -ne 0) { throw 'Playwright CDP 实际连接失败' }
+
+          $listener = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($listener) { Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue }
